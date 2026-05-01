@@ -1926,7 +1926,7 @@ function simulateTrickAfterPlay(playerIndex, card) {
   while (trick.length < 5 && guard < 5) {
     const hand = state.hands[next].filter((item) => !usedIds.has(item.id));
     const legalCards = getLegalCardsForSim(next, hand, trick, jokerLeadSuit, jokerCallActive);
-    const response = chooseSimulatedResponse(next, legalCards, trick, jokerLeadSuit);
+    const response = chooseSimulatedResponse(next, legalCards, trick, jokerLeadSuit, jokerCallActive);
     if (!response) {
       break;
     }
@@ -1936,7 +1936,7 @@ function simulateTrickAfterPlay(playerIndex, card) {
     guard += 1;
   }
 
-  const winner = getTrickWinnerForContext(trick, jokerLeadSuit, state.trickNumber);
+  const winner = getTrickWinnerForContext(trick, jokerLeadSuit, state.trickNumber, jokerCallActive);
   const points = trick.filter((entry) => isPointCard(entry.card)).length;
   return { winner, points, trick };
 }
@@ -1950,7 +1950,7 @@ function evaluateCurrentTrickTree(playerIndex, card, perspectiveSide) {
     : state.jokerCallActive;
   const trick = [...state.trick, { playerIndex, card }];
   if (trick.length === 5) {
-    return scoreTrickTreeTerminal(trick, jokerLeadSuit, perspectiveSide, playerIndex);
+    return scoreTrickTreeTerminal(trick, jokerLeadSuit, jokerCallActive, perspectiveSide, playerIndex);
   }
 
   const usedIds = new Set(trick.map((entry) => entry.card.id));
@@ -1979,17 +1979,17 @@ function minimaxTrickNode(
   beta,
 ) {
   if (trick.length === 5) {
-    return scoreTrickTreeTerminal(trick, jokerLeadSuit, perspectiveSide, observerIndex);
+    return scoreTrickTreeTerminal(trick, jokerLeadSuit, jokerCallActive, perspectiveSide, observerIndex);
   }
 
   const hand = (state.hands[playerIndex] || []).filter((card) => !usedIds.has(card.id));
   const legalCards = getLegalCardsForSim(playerIndex, hand, trick, jokerLeadSuit, jokerCallActive);
   if (!legalCards.length) {
-    return scoreTrickTreeTerminal(trick, jokerLeadSuit, perspectiveSide, observerIndex);
+    return scoreTrickTreeTerminal(trick, jokerLeadSuit, jokerCallActive, perspectiveSide, observerIndex);
   }
 
   const maximizing = getSideForAi(playerIndex) === perspectiveSide;
-  const orderedCards = orderTrickTreeCards(playerIndex, legalCards, trick, jokerLeadSuit);
+  const orderedCards = orderTrickTreeCards(playerIndex, legalCards, trick, jokerLeadSuit, jokerCallActive);
   let best = maximizing ? -Infinity : Infinity;
 
   for (const nextCard of orderedCards) {
@@ -2028,8 +2028,8 @@ function minimaxTrickNode(
   return best;
 }
 
-function orderTrickTreeCards(playerIndex, legalCards, trick, jokerLeadSuit) {
-  const currentWinner = getTrickWinnerForContext(trick, jokerLeadSuit, state.trickNumber);
+function orderTrickTreeCards(playerIndex, legalCards, trick, jokerLeadSuit, jokerCallActive = state.jokerCallActive) {
+  const currentWinner = getTrickWinnerForContext(trick, jokerLeadSuit, state.trickNumber, jokerCallActive);
   const currentWinnerSide = getSideForAi(currentWinner);
   const playerSide = getSideForAi(playerIndex);
   const trickPoints = trick.filter((entry) => isPointCard(entry.card)).length;
@@ -2037,8 +2037,8 @@ function orderTrickTreeCards(playerIndex, legalCards, trick, jokerLeadSuit) {
   return legalCards
     .slice()
     .sort((a, b) => {
-      const scoreA = evaluateSimulatedResponse(playerIndex, a, trick, jokerLeadSuit, currentWinnerSide, playerSide, trickPoints, remainingAfter);
-      const scoreB = evaluateSimulatedResponse(playerIndex, b, trick, jokerLeadSuit, currentWinnerSide, playerSide, trickPoints, remainingAfter);
+      const scoreA = evaluateSimulatedResponse(playerIndex, a, trick, jokerLeadSuit, jokerCallActive, currentWinnerSide, playerSide, trickPoints, remainingAfter);
+      const scoreB = evaluateSimulatedResponse(playerIndex, b, trick, jokerLeadSuit, jokerCallActive, currentWinnerSide, playerSide, trickPoints, remainingAfter);
       return scoreB - scoreA || aiCardSpendCost(a) - aiCardSpendCost(b);
     });
 }
@@ -2053,8 +2053,8 @@ function trickTreeSpendAdjustment(playerIndex, card, perspectiveSide, trick) {
   return (sameSide ? -1 : 1) * aiCardSpendCost(card) * factor;
 }
 
-function scoreTrickTreeTerminal(trick, jokerLeadSuit, perspectiveSide, observerIndex) {
-  const winner = getTrickWinnerForContext(trick, jokerLeadSuit, state.trickNumber);
+function scoreTrickTreeTerminal(trick, jokerLeadSuit, jokerCallActive, perspectiveSide, observerIndex) {
+  const winner = getTrickWinnerForContext(trick, jokerLeadSuit, state.trickNumber, jokerCallActive);
   const winnerSide = getSideForAi(winner);
   const points = trick.filter((entry) => isPointCard(entry.card)).length;
   const declarerPoints = getDeclarerTeamPointsForAi(observerIndex);
@@ -2106,11 +2106,11 @@ function isLegalFollowForSim(playerIndex, card, hand, trick, jokerLeadSuit, joke
   return !hasLeadSuit || (!isSpecial(card) && card.suit === leadSuit);
 }
 
-function chooseSimulatedResponse(playerIndex, legalCards, trick, jokerLeadSuit) {
+function chooseSimulatedResponse(playerIndex, legalCards, trick, jokerLeadSuit, jokerCallActive = state.jokerCallActive) {
   if (!legalCards.length) {
     return null;
   }
-  const currentWinner = getTrickWinnerForContext(trick, jokerLeadSuit, state.trickNumber);
+  const currentWinner = getTrickWinnerForContext(trick, jokerLeadSuit, state.trickNumber, jokerCallActive);
   const currentWinnerSide = getSideForAi(currentWinner);
   const playerSide = getSideForAi(playerIndex);
   const trickPoints = trick.filter((entry) => isPointCard(entry.card)).length;
@@ -2119,15 +2119,15 @@ function chooseSimulatedResponse(playerIndex, legalCards, trick, jokerLeadSuit) 
   return legalCards
     .slice()
     .sort((a, b) => {
-      const scoreA = evaluateSimulatedResponse(playerIndex, a, trick, jokerLeadSuit, currentWinnerSide, playerSide, trickPoints, remainingAfter);
-      const scoreB = evaluateSimulatedResponse(playerIndex, b, trick, jokerLeadSuit, currentWinnerSide, playerSide, trickPoints, remainingAfter);
+      const scoreA = evaluateSimulatedResponse(playerIndex, a, trick, jokerLeadSuit, jokerCallActive, currentWinnerSide, playerSide, trickPoints, remainingAfter);
+      const scoreB = evaluateSimulatedResponse(playerIndex, b, trick, jokerLeadSuit, jokerCallActive, currentWinnerSide, playerSide, trickPoints, remainingAfter);
       return scoreB - scoreA || aiCardSpendCost(a) - aiCardSpendCost(b);
     })[0];
 }
 
-function evaluateSimulatedResponse(playerIndex, card, trick, jokerLeadSuit, currentWinnerSide, playerSide, trickPoints, remainingAfter) {
+function evaluateSimulatedResponse(playerIndex, card, trick, jokerLeadSuit, jokerCallActive, currentWinnerSide, playerSide, trickPoints, remainingAfter) {
   const preview = [...trick, { playerIndex, card }];
-  const winner = getTrickWinnerForContext(preview, jokerLeadSuit, state.trickNumber);
+  const winner = getTrickWinnerForContext(preview, jokerLeadSuit, state.trickNumber, jokerCallActive);
   const winnerSide = getSideForAi(winner);
   const winsNow = winner === playerIndex;
   const pointsWithCard = trickPoints + (isPointCard(card) ? 1 : 0);
@@ -2538,15 +2538,21 @@ function resolveTrick() {
 }
 
 function getTrickWinner(trick) {
-  return getTrickWinnerForContext(trick, state.jokerLeadSuit, state.trickNumber);
+  return getTrickWinnerForContext(trick, state.jokerLeadSuit, state.trickNumber, state.jokerCallActive);
 }
 
-function getTrickWinnerForContext(trick, jokerLeadSuit = state.jokerLeadSuit, trickNumber = state.trickNumber) {
+function getTrickWinnerForContext(
+  trick,
+  jokerLeadSuit = state.jokerLeadSuit,
+  trickNumber = state.trickNumber,
+  jokerCallActive = state.jokerCallActive,
+) {
   const leadSuit = getLeadSuitForContext(trick, jokerLeadSuit);
+  const jokerCalled = isJokerCallLeadForTrick(trick, jokerCallActive);
   let winningEntry = trick[0];
-  let winningPower = cardPowerForContext(winningEntry.card, leadSuit, trickNumber);
+  let winningPower = cardPowerForContext(winningEntry.card, leadSuit, trickNumber, jokerCalled);
   for (const entry of trick.slice(1)) {
-    const power = cardPowerForContext(entry.card, leadSuit, trickNumber);
+    const power = cardPowerForContext(entry.card, leadSuit, trickNumber, jokerCalled);
     if (power > winningPower) {
       winningPower = power;
       winningEntry = entry;
@@ -2611,14 +2617,17 @@ function jokerLeadSuitScore(suit, suitCounts, pointCounts, playerIsDeclarerSide,
 }
 
 function cardPower(card, leadSuit) {
-  return cardPowerForContext(card, leadSuit, state.trickNumber);
+  return cardPowerForContext(card, leadSuit, state.trickNumber, isJokerCallLead());
 }
 
-function cardPowerForContext(card, leadSuit, trickNumber = state.trickNumber) {
+function cardPowerForContext(card, leadSuit, trickNumber = state.trickNumber, jokerCalled = false) {
   if (isMighty(card, state.trump)) {
     return 1000;
   }
   if (card.joker) {
+    if (jokerCalled) {
+      return -100;
+    }
     return isJokerEffectiveForTrick(trickNumber) ? 900 : -100;
   }
   if (card.suit === state.trump) {
