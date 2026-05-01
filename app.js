@@ -2785,10 +2785,13 @@ function renderCharacterEditor() {
                   이름
                   <input type="text" maxlength="12" value="${escapeHtml(profile.name)}" data-character-name="${index}" />
                 </label>
-                <label>
-                  이미지 URL/경로
-                  <input type="text" value="${escapeHtml(profile.avatarUrl)}" data-character-avatar="${index}" placeholder="https://... 또는 assets/..." />
-                </label>
+                <details class="avatar-details">
+                  <summary>이미지</summary>
+                  <label>
+                    URL/경로
+                    <input type="text" value="${escapeHtml(profile.avatarUrl)}" data-character-avatar="${index}" placeholder="https://... 또는 assets/..." />
+                  </label>
+                </details>
               </div>
             </div>
           `;

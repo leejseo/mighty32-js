@@ -678,6 +678,22 @@ button.card.is-pressed {
   min-width: 0;
 }
 
+.avatar-details {
+  min-width: 0;
+}
+
+.avatar-details summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  list-style-position: inside;
+  padding: 2px 0;
+}
+
+.avatar-details label {
+  margin-top: 4px;
+}
+
 .record-row {
   display: grid;
   gap: 3px;
