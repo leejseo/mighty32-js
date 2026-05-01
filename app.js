@@ -48,6 +48,7 @@ const IS_STATIC_PAGES_HOST =
   window.location.hostname.endsWith(".github.io");
 const HUMAN = 0;
 const MAX_TARGET = 20;
+const TOTAL_POINT_CARDS = 20;
 const MIN_TARGET = 13;
 const MIN_NO_TRUMP_TARGET = 12;
 const CPU_DELAY = 4500;
@@ -94,6 +95,7 @@ function createEmptyState() {
     jokerCallActive: false,
     pendingJokerCallCardId: null,
     trickNumber: 1,
+    playHistory: [],
     dealMissPlayers: [],
     selectedDiscardIds: new Set(),
     records: [],
@@ -139,6 +141,9 @@ document.addEventListener("click", (event) => {
   if (action === "pass") {
     humanPass();
   }
+  if (action === "confirm-contract") {
+    confirmHumanContract();
+  }
   if (action === "pick-friend") {
     pickFriend(actionTarget.dataset.friendId || null);
   }
@@ -171,6 +176,9 @@ document.addEventListener("click", (event) => {
 document.addEventListener("change", (event) => {
   if (event.target.matches("#bid-trump")) {
     updateBidTargetBounds();
+  }
+  if (event.target.matches("#contract-trump")) {
+    updateContractTargetBounds();
   }
 });
 
@@ -438,6 +446,24 @@ function bidBeats(candidate, current) {
   return candidate.trump === "NT" && current.trump !== "NT";
 }
 
+function contractMatchesCurrent(candidate) {
+  return state.currentBid && candidate.trump === state.currentBid.trump && candidate.target === state.currentBid.target;
+}
+
+function contractAdjustmentAllowed(candidate) {
+  return contractMatchesCurrent(candidate) || bidBeats(candidate, state.currentBid);
+}
+
+function getMinimumContractAdjustment(trump = state.trump) {
+  const floor = getOpeningBidFloor(trump);
+  for (let target = floor; target <= MAX_TARGET; target += 1) {
+    if (contractAdjustmentAllowed({ trump, target })) {
+      return target;
+    }
+  }
+  return MAX_TARGET + 1;
+}
+
 function getBidPower(bid) {
   return bid.target + (bid.trump === "NT" ? 0.1 : 0);
 }
@@ -465,6 +491,28 @@ function updateBidTargetBounds() {
     return;
   }
   if (!state.currentBid || Number(targetInput.value) < minTarget || Number(targetInput.value) === previousMin) {
+    targetInput.value = String(minTarget);
+  }
+}
+
+function updateContractTargetBounds() {
+  const trumpInput = document.querySelector("#contract-trump");
+  const targetInput = document.querySelector("#contract-target");
+  if (!trumpInput || !targetInput) {
+    return;
+  }
+  const minTarget = getMinimumContractAdjustment(trumpInput.value);
+  targetInput.min = String(minTarget);
+  targetInput.disabled = minTarget > MAX_TARGET;
+  const confirmButton = document.querySelector('[data-action="confirm-contract"]');
+  if (confirmButton) {
+    confirmButton.disabled = minTarget > MAX_TARGET;
+  }
+  if (minTarget > MAX_TARGET) {
+    targetInput.value = String(MAX_TARGET);
+    return;
+  }
+  if (Number(targetInput.value) < minTarget) {
     targetInput.value = String(minTarget);
   }
 }
@@ -759,14 +807,82 @@ function finishBidding() {
   addLog(`${PLAYER_NAMES[state.declarerIndex]}이 주공입니다. 바닥패 3장을 가져갑니다.`);
 
   if (state.declarerIndex === HUMAN) {
-    state.phase = "friend";
-    state.message = "프렌드 카드를 고르세요. 선택한 카드를 낸 사람이 주공 편이 됩니다.";
+    state.phase = "contract";
+    state.currentPlayer = HUMAN;
+    state.message = "바닥패를 확인했습니다. 공약을 유지하거나 더 높은 공약으로 조정하세요.";
     render();
     return;
   }
 
+  chooseCpuContractAdjustment();
   chooseCpuFriendAndDiscard();
-  startPlaying();
+  announceCpuFriendThenStart();
+}
+
+function confirmHumanContract() {
+  if (state.phase !== "contract" || state.declarerIndex !== HUMAN) {
+    return;
+  }
+  const trumpInput = document.querySelector("#contract-trump");
+  const targetInput = document.querySelector("#contract-target");
+  const trump = trumpInput ? trumpInput.value : state.trump;
+  const target = Number(targetInput ? targetInput.value : state.target);
+  const minTarget = getMinimumContractAdjustment(trump);
+
+  if (!BID_TRUMPS.includes(trump)) {
+    state.message = "올바른 기루를 선택해야 합니다.";
+    render();
+    return;
+  }
+  if (!Number.isInteger(target) || target < minTarget || target > MAX_TARGET || !contractAdjustmentAllowed({ trump, target })) {
+    state.message = "기존 입찰보다 높은 공약이거나 현재 공약 그대로여야 합니다.";
+    render();
+    return;
+  }
+
+  applyContractAdjustment(HUMAN, trump, target);
+  state.phase = "friend";
+  state.message = "프렌드 카드를 고르세요. 선택한 카드를 낸 사람이 주공 편이 됩니다.";
+  render();
+}
+
+function chooseCpuContractAdjustment() {
+  const original = { ...state.currentBid };
+  const decision = chooseCpuBid(state.declarerIndex);
+  if (decision && bidBeats(decision, original)) {
+    applyContractAdjustment(state.declarerIndex, decision.trump, decision.target);
+    return;
+  }
+  applyContractAdjustment(state.declarerIndex, original.trump, original.target, false);
+}
+
+function applyContractAdjustment(playerIndex, trump, target, logUnchanged = true) {
+  const changed = state.trump !== trump || state.target !== target;
+  state.currentBid = {
+    playerIndex,
+    trump,
+    target,
+  };
+  state.trump = trump;
+  state.target = target;
+  sortHand(state.declarerIndex);
+  if (changed) {
+    addLog(`${PLAYER_NAMES[playerIndex]}이 바닥패 확인 후 ${SUIT_NAMES[trump]} ${target}점으로 공약을 조정했습니다.`);
+  } else if (logUnchanged) {
+    addLog(`${PLAYER_NAMES[playerIndex]}이 ${SUIT_NAMES[trump]} ${target}점 공약을 유지했습니다.`);
+  }
+}
+
+function announceCpuFriendThenStart() {
+  const declarerName = PLAYER_NAMES[state.declarerIndex];
+  state.phase = "announcement";
+  state.currentPlayer = state.declarerIndex;
+  state.message = state.friendCardId
+    ? `${declarerName}의 프렌드는 ${formatCardById(state.friendCardId)}입니다.`
+    : `${declarerName}이 독주를 선언했습니다.`;
+  render();
+  clearTimeout(cpuTimer);
+  cpuTimer = setTimeout(startPlaying, TRICK_RESOLVE_DELAY * 1.6);
 }
 
 function evaluateBid(hand, playerIndex = HUMAN) {
@@ -1406,6 +1522,7 @@ function evaluateCpuCardChoice(playerIndex, card, legalCards) {
   const winnerSide = getSideForAi(outcome.winner);
   const playerSideWins = playerSide === winnerSide;
   const declarerSideWins = winnerSide === "declarer";
+  const existingPointCardsInTrick = state.trick.filter((entry) => isPointCard(entry.card)).length;
   const pointCardsInTrick = state.trick.filter((entry) => isPointCard(entry.card)).length + (isPointCard(card) ? 1 : 0);
   const declarerPoints = getDeclarerTeamPointsForAi(playerIndex);
   const declarerNeed = Math.max(0, state.target - declarerPoints);
@@ -1457,12 +1574,13 @@ function evaluateCpuCardChoice(playerIndex, card, legalCards) {
   if (card.joker && isJokerEffective() && outcome.points === 0 && !late) {
     score -= 22;
   }
-  if (isMighty(card, state.trump) && outcome.points === 0 && !late) {
-    score -= 18;
+  if (isMighty(card, state.trump) && existingPointCardsInTrick === 0 && !late) {
+    score -= 36;
   }
   if (card.suit === state.trump && state.trump !== "NT" && card.rank >= 12 && outcome.points === 0 && !late) {
     score -= 8;
   }
+  score += evaluateMightyConservation(playerIndex, card, legalCards, outcome);
 
   score -= spent * (playerSideWins ? 0.08 : 0.18);
   score += Math.random() * 0.08;
@@ -1506,6 +1624,7 @@ function evaluateLeadPlan(playerIndex, card, outcome, legalCards) {
   score += evaluateDefenseLeadPlan(playerIndex, card, legalCards);
   score += evaluateJokerCallLeadPlan(playerIndex, card);
   score += evaluateFriendLeadDiscipline(playerIndex, card, legalCards);
+  score += evaluateCardCountingLeadPlan(playerIndex, card);
   return score;
 }
 
@@ -1514,11 +1633,28 @@ function evaluateTrickResponseDiscipline(playerIndex, card, legalCards, currentW
   const preview = [...state.trick, { playerIndex, card }];
   const winner = getTrickWinner(preview);
   const winsWithCard = winner === playerIndex;
-  const trickPoints = state.trick.filter((entry) => isPointCard(entry.card)).length + (isPointCard(card) ? 1 : 0);
+  const existingTrickPoints = state.trick.filter((entry) => isPointCard(entry.card)).length;
+  const trickPoints = existingTrickPoints + (isPointCard(card) ? 1 : 0);
   let score = 0;
 
   if (currentWinnerSide === playerSide && winsWithCard && currentWinner !== playerIndex) {
-    score -= 20 + aiCardSpendCost(card) * (trickPoints > 0 ? 0.04 : 0.09);
+    const currentWinnerCard = state.trick.find((entry) => entry.playerIndex === currentWinner)?.card;
+    const secureAllyTrick = state.trick.length === 4 || (currentWinnerCard && cardPower(currentWinnerCard, getLeadSuit()) >= 900);
+    score -= 56 + aiCardSpendCost(card) * (trickPoints > 0 ? 0.22 : 0.34);
+    if (isControlCard(card)) {
+      score -= secureAllyTrick ? 84 : 52;
+    }
+    if ((card.joker || isMighty(card, state.trump)) && existingTrickPoints === 0) {
+      score -= 65;
+    }
+  }
+
+  if (currentWinnerSide === playerSide && !winsWithCard) {
+    if (isPointCard(card)) {
+      score += 18;
+    } else if (!isSpecial(card)) {
+      score += Math.max(0, 9 - card.rank) * 0.9;
+    }
   }
 
   if (!winsWithCard) {
@@ -1537,6 +1673,92 @@ function evaluateTrickResponseDiscipline(playerIndex, card, legalCards, currentW
   const rate = trickPoints > 0 ? 0.07 : 0.18;
   score -= overpay * (finalSeat ? rate * 0.65 : rate);
   return score;
+}
+
+function evaluateMightyConservation(playerIndex, card, legalCards, outcome) {
+  if (!isMighty(card, state.trump)) {
+    return 0;
+  }
+
+  const playerSide = getSideForAi(playerIndex);
+  const late = state.trickNumber >= 8;
+  const ordinaryAlternative = legalCards.some((candidate) => candidate.id !== card.id && !candidate.joker && !isMighty(candidate, state.trump));
+  const anyAlternative = legalCards.some((candidate) => candidate.id !== card.id);
+  let score = 0;
+
+  if (state.trick.length === 0) {
+    if (anyAlternative && !late) {
+      score -= ordinaryAlternative ? 88 : 54;
+    } else if (anyAlternative && state.trickNumber < 10) {
+      score -= ordinaryAlternative ? 38 : 22;
+    }
+    return score;
+  }
+
+  const currentWinner = getTrickWinner([...state.trick]);
+  const currentWinnerSide = getSideForAi(currentWinner);
+  const currentWinnerIsAlly = currentWinnerSide === playerSide;
+  const existingPoints = state.trick.filter((entry) => isPointCard(entry.card)).length;
+  const finalSeat = state.trick.length === 4;
+  const declarerNeed = Math.max(0, state.target - getDeclarerTeamPointsForAi(playerIndex));
+  const pointUrgency = getMightyPointUrgency(playerIndex, playerSide, currentWinnerSide, existingPoints);
+  const leadSuit = getLeadSuit();
+  const hasOrdinaryTrumpAlternative =
+    state.trump !== "NT" &&
+    leadSuit === state.trump &&
+    legalCards.some((candidate) => candidate.id !== card.id && isOrdinaryTrump(candidate));
+
+  if (currentWinnerIsAlly) {
+    score -= ordinaryAlternative ? 105 : 70;
+  }
+  if (hasOrdinaryTrumpAlternative) {
+    score -= Math.max(0, (currentWinnerIsAlly ? 180 : 120) - pointUrgency);
+  }
+  if (existingPoints === 0 && !late) {
+    score -= ordinaryAlternative ? 95 : 54;
+  } else if (existingPoints <= 1 && !late) {
+    score -= Math.max(0, (ordinaryAlternative ? 112 : 54) - pointUrgency);
+  }
+  if (!finalSeat && existingPoints <= 1 && !late) {
+    score -= Math.max(0, 42 - pointUrgency * 0.5);
+  }
+  if (playerSide === "defense" && currentWinnerSide === "declarer" && existingPoints >= Math.max(2, declarerNeed)) {
+    score += 35;
+  }
+  if (playerSide === "declarer" && currentWinnerSide === "defense" && existingPoints >= Math.max(2, declarerNeed)) {
+    score += 28;
+  }
+  score += pointUrgency * 0.35;
+  if (outcome.winner !== playerIndex && anyAlternative) {
+    score -= 40;
+  }
+  return score;
+}
+
+function getMightyPointUrgency(playerIndex, playerSide, currentWinnerSide, existingPoints) {
+  if (existingPoints <= 0 || currentWinnerSide === playerSide) {
+    return 0;
+  }
+  const declarerPoints = getDeclarerTeamPointsForAi(playerIndex);
+  const defensePoints = getDefenseTeamPointsForAi();
+  const declarerLossAllowance = Math.max(0, TOTAL_POINT_CARDS - state.target);
+  const remainingSafeLosses = Math.max(0, declarerLossAllowance - defensePoints);
+  const contractPressure = clamp((state.target - 15) / 5, 0, 1);
+  const allowancePressure = clamp((5 - remainingSafeLosses) / 5, 0, 1);
+  const declarerNeed = Math.max(0, state.target - declarerPoints);
+  const remainingTricks = Math.max(1, 11 - state.trickNumber);
+  const remainingPointPressure = clamp((declarerNeed - remainingTricks * 1.8) / 8, 0, 1);
+  const latePressure = state.trickNumber >= 7 ? 0.2 : 0;
+  const pointPressure = clamp(existingPoints / 2, 0.75, 1);
+  const urgency = (allowancePressure * 52 + contractPressure * 22 + remainingPointPressure * 18 + latePressure * 18) * pointPressure;
+
+  if (playerSide === "defense" && currentWinnerSide === "declarer") {
+    return urgency;
+  }
+  if (playerSide === "declarer" && currentWinnerSide === "defense") {
+    return urgency * 0.86;
+  }
+  return 0;
 }
 
 function evaluateDeclarerLeadPlan(playerIndex, card, legalCards) {
@@ -1579,7 +1801,7 @@ function evaluateDefenseLeadPlan(playerIndex, card, legalCards) {
     score -= state.trickNumber <= 7 && declarerNeed > 3 ? 18 : 7;
   }
   if (!isSpecial(card) && card.suit !== state.trump && card.rank === 14) {
-    score += canPlayerFollowSuitInActualHand(state.declarerIndex, card.suit) ? 8 : -16;
+    score += isPlayerKnownVoidInSuit(state.declarerIndex, card.suit) ? -22 : 6;
   }
   if (!isSpecial(card) && !isPointCard(card) && card.suit !== state.trump) {
     const suitCount = (getSuitCounts(state.hands[playerIndex] || [])[card.suit] || 0);
@@ -1587,6 +1809,43 @@ function evaluateDefenseLeadPlan(playerIndex, card, legalCards) {
   }
   if (legalCards.some((candidate) => isJokerCall(candidate)) && card.joker) {
     score -= 12;
+  }
+  return score;
+}
+
+function evaluateCardCountingLeadPlan(playerIndex, card) {
+  if (isSpecial(card)) {
+    return 0;
+  }
+
+  const playerSide = getSideForAi(playerIndex);
+  const unseenBySuit = countPublicUnseenCardsBySuit(playerIndex);
+  const voids = getKnownVoidSuitsByPlayer();
+  const opponentsVoid = [];
+  const alliesVoid = [];
+  for (let index = 0; index < PLAYER_NAMES.length; index += 1) {
+    if (index === playerIndex || !voids[index]?.has(card.suit)) {
+      continue;
+    }
+    if (getSideForAi(index) === playerSide) {
+      alliesVoid.push(index);
+    } else {
+      opponentsVoid.push(index);
+    }
+  }
+
+  let score = 0;
+  if (opponentsVoid.length) {
+    score -= isPointCard(card) ? opponentsVoid.length * 14 : opponentsVoid.length * 5;
+  }
+  if (alliesVoid.length && !isPointCard(card)) {
+    score += alliesVoid.length * 2.5;
+  }
+  if (card.rank === 14 && unseenBySuit[card.suit] <= 1 && !opponentsVoid.length) {
+    score += 6;
+  }
+  if (card.suit === state.trump && opponentsVoid.length) {
+    score -= opponentsVoid.length * 8;
   }
   return score;
 }
@@ -1774,8 +2033,11 @@ function orderTrickTreeCards(playerIndex, legalCards, trick, jokerLeadSuit) {
 
 function trickTreeSpendAdjustment(playerIndex, card, perspectiveSide, trick) {
   const sameSide = getSideForAi(playerIndex) === perspectiveSide;
-  const pointsWithCard = trick.filter((entry) => isPointCard(entry.card)).length;
-  const factor = pointsWithCard > 0 ? 0.025 : 0.075;
+  const otherPoints = trick.filter((entry) => entry.card.id !== card.id && isPointCard(entry.card)).length;
+  let factor = otherPoints > 0 ? 0.025 : 0.075;
+  if (isMighty(card, state.trump) && otherPoints === 0 && state.trickNumber <= 7) {
+    factor = 0.17;
+  }
   return (sameSide ? -1 : 1) * aiCardSpendCost(card) * factor;
 }
 
@@ -1865,6 +2127,12 @@ function evaluateSimulatedResponse(playerIndex, card, trick, jokerLeadSuit, curr
     }
     score += winnerSide === playerSide ? 8 : -16;
     score -= aiCardSpendCost(card) * 0.2;
+    if (winsNow) {
+      score -= 48 + aiCardSpendCost(card) * 0.2;
+      if (isControlCard(card)) {
+        score -= 46;
+      }
+    }
   } else if (winsNow) {
     score += pointsWithCard > 0 || remainingAfter === 0 ? 18 + pointsWithCard * 6 : 5;
     score -= aiCardSpendCost(card) * (pointsWithCard > 0 ? 0.08 : 0.22);
@@ -1876,8 +2144,20 @@ function evaluateSimulatedResponse(playerIndex, card, trick, jokerLeadSuit, curr
   if (card.joker && !isJokerEffective()) {
     score -= 80;
   }
-  if ((card.joker || isMighty(card, state.trump)) && pointsWithCard === 0 && state.trickNumber <= 7) {
+  if (card.joker && pointsWithCard === 0 && state.trickNumber <= 7) {
     score -= 16;
+  }
+  if (isMighty(card, state.trump)) {
+    const pointUrgency = getMightyPointUrgency(playerIndex, playerSide, currentWinnerSide, trickPoints);
+    if (currentWinnerSide === playerSide) {
+      score -= 55;
+    }
+    if (trickPoints === 0 && state.trickNumber <= 7) {
+      score -= 52;
+    } else if (trickPoints <= 1 && state.trickNumber <= 6) {
+      score -= Math.max(0, 24 - pointUrgency * 0.6);
+    }
+    score += pointUrgency * 0.25;
   }
   return score;
 }
@@ -2160,6 +2440,7 @@ function playCard(playerIndex, cardId) {
   }
   hand.splice(cardIndex, 1);
   state.trick.push({ playerIndex, card });
+  recordCardPlay(playerIndex, card);
 
   if (declaredJokerCall) {
     addLog(`${PLAYER_NAMES[playerIndex]}이 조커콜을 선언했습니다.`);
@@ -2189,6 +2470,21 @@ function playCard(playerIndex, cardId) {
     render();
   }
   return true;
+}
+
+function recordCardPlay(playerIndex, card) {
+  const leadSuit = getLeadSuit();
+  state.playHistory.push({
+    trickNumber: state.trickNumber,
+    playerIndex,
+    cardId: card.id,
+    suit: card.suit,
+    rank: card.rank,
+    joker: Boolean(card.joker),
+    leadSuit,
+    isLead: state.trick.length === 1,
+    jokerCallActive: isJokerCallLead(),
+  });
 }
 
 function getPlayedCardLabel(card) {
@@ -2546,6 +2842,56 @@ function getCardOwnerIndex(cardId) {
   return null;
 }
 
+function getCardById(cardId) {
+  return createDeck().find((card) => card.id === cardId) || null;
+}
+
+function getKnownVoidSuitsByPlayer() {
+  const voids = Array.from({ length: PLAYER_NAMES.length }, () => new Set());
+  for (const entry of state.playHistory || []) {
+    if (entry.isLead || !entry.leadSuit || entry.joker) {
+      continue;
+    }
+    const card = getCardById(entry.cardId);
+    if (!card || isMighty(card, state.trump)) {
+      continue;
+    }
+    if (card.suit !== entry.leadSuit) {
+      voids[entry.playerIndex].add(entry.leadSuit);
+    }
+  }
+  return voids;
+}
+
+function isPlayerKnownVoidInSuit(playerIndex, suit) {
+  if (!SUITS.includes(suit)) {
+    return false;
+  }
+  const voids = getKnownVoidSuitsByPlayer();
+  return Boolean(voids[playerIndex]?.has(suit));
+}
+
+function getPublicKnownCardIds(observerIndex) {
+  const known = new Set((state.playHistory || []).map((entry) => entry.cardId));
+  for (const card of state.hands[observerIndex] || []) {
+    known.add(card.id);
+  }
+  if (canAiSeeBuried(observerIndex)) {
+    for (const card of state.buried) {
+      known.add(card.id);
+    }
+  }
+  return known;
+}
+
+function countPublicUnseenCardsBySuit(observerIndex) {
+  const known = getPublicKnownCardIds(observerIndex);
+  return SUITS.reduce((counts, suit) => {
+    counts[suit] = createDeck().filter((card) => !card.joker && card.suit === suit && !known.has(card.id)).length;
+    return counts;
+  }, {});
+}
+
 function isDeclarerSideForAi(playerIndex) {
   if (playerIndex === state.declarerIndex) {
     return true;
@@ -2575,6 +2921,16 @@ function getDeclarerTeamPointsForAi(observerIndex = state.declarerIndex) {
     }
     return sum + cards.filter(isPointCard).length;
   }, buriedPoints);
+}
+
+function getDefenseTeamPointsForAi() {
+  const friendOwner = getFriendOwnerIndex();
+  return state.captured.reduce((sum, cards, playerIndex) => {
+    if (playerIndex === state.declarerIndex || playerIndex === friendOwner) {
+      return sum;
+    }
+    return sum + cards.filter(isPointCard).length;
+  }, 0);
 }
 
 function canHumanSeeBuried() {
@@ -2928,6 +3284,42 @@ function renderControlPanel() {
     `;
   }
 
+  if (state.phase === "announcement") {
+    return `<div class="notice">${escapeHtml(state.message)}</div>`;
+  }
+
+  if (state.phase === "contract") {
+    const minTarget = getMinimumContractAdjustment(state.trump);
+    return `
+      <div class="notice">바닥패를 본 뒤 공약을 유지하거나 더 높은 공약으로 조정할 수 있습니다.</div>
+      <dl class="score-grid section-gap">
+        <dt>현재 공약</dt><dd>${SUIT_LABELS[state.trump]} ${state.target}</dd>
+      </dl>
+      <div class="control-panel">
+        <div class="control-line">
+          <label>기루
+            <select id="contract-trump">
+              ${BID_TRUMPS.map((suit) => {
+                const optionMin = getMinimumContractAdjustment(suit);
+                const disabled = optionMin > MAX_TARGET;
+                const selected = suit === state.trump;
+                return `<option value="${suit}" ${selected ? "selected" : ""} ${disabled ? "disabled" : ""}>${SUIT_LABELS[suit]} ${SUIT_NAMES[suit]}</option>`;
+              }).join("")}
+            </select>
+          </label>
+        </div>
+        <div class="control-line">
+          <label>목표
+            <input id="contract-target" type="number" min="${minTarget}" max="${MAX_TARGET}" value="${state.target}" />
+          </label>
+        </div>
+        <div class="control-line">
+          <button type="button" data-action="confirm-contract">공약 확정</button>
+        </div>
+      </div>
+    `;
+  }
+
   if (state.phase === "friend") {
     const candidates = getFriendCandidates(HUMAN).slice(0, 10);
     return `
@@ -3274,6 +3666,8 @@ function phaseLabel(phase) {
     loading: "준비",
     dealMiss: "딜미스",
     bidding: "입찰",
+    announcement: "프렌드 공개",
+    contract: "공약 조정",
     friend: "프렌드 선택",
     discard: "묻기",
     playing: "플레이",
