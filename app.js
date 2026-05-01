@@ -464,7 +464,7 @@ function getMinimumContractAdjustment(trump = state.trump) {
   const floor = getOpeningBidFloor(trump);
   const minTarget = trump === state.currentBid.trump
     ? state.currentBid.target
-    : state.currentBid.target + 2;
+    : state.currentBid.target + (trump === "NT" ? 1 : 2);
   return Math.max(floor, minTarget);
 }
 
@@ -845,7 +845,9 @@ function confirmHumanContract() {
   if (!Number.isInteger(target) || target < minTarget || target > MAX_TARGET || !contractAdjustmentAllowed({ trump, target })) {
     state.message = trump === state.currentBid.trump
       ? `현재 기루를 유지하면 ${minTarget}점 이상이어야 합니다.`
-      : `바닥패 확인 후 기루 변경은 ${minTarget}점 이상이어야 합니다.`;
+      : trump === "NT"
+        ? `바닥패 확인 후 노기루 변경은 ${minTarget}점 이상이어야 합니다.`
+        : `바닥패 확인 후 기루 변경은 ${minTarget}점 이상이어야 합니다.`;
     render();
     return;
   }
@@ -3324,7 +3326,7 @@ function renderControlPanel() {
             <input id="contract-target" type="number" min="${minTarget}" max="${MAX_TARGET}" value="${state.target}" />
           </label>
         </div>
-        <div class="notice compact">같은 기루는 현재 공약 이상, 기루 변경은 바닥패 확인 후 현재 공약 +2 이상입니다.</div>
+        <div class="notice compact">같은 기루는 현재 공약 이상, 노기루 변경은 +1 이상, 일반 기루 변경은 +2 이상입니다.</div>
         <div class="control-line">
           <button type="button" data-action="confirm-contract">공약 확정</button>
         </div>
