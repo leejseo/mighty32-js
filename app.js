@@ -768,6 +768,9 @@ function shouldPassForFailureRisk(candidate, personality) {
   if (candidate.target >= 16 && !isHighBidShape(candidate)) {
     return true;
   }
+  if (candidate.target >= 16 && candidate.failure.expectedPoints < candidate.target + requiredBidPointMargin(candidate.target)) {
+    return true;
+  }
   if (candidate.target >= 17 && candidate.trump !== "NT" && !candidate.shape?.hasTopTrump) {
     return true;
   }
@@ -1003,7 +1006,7 @@ function makeBidCandidate(trump, raw, hand, personality) {
   const expectedPoints = estimateBidExpectedPoints(hand, trump, adjustedRaw, quality);
   const initialCeiling = Math.max(floor - 1, Math.min(MAX_TARGET, Math.floor(adjustedRaw)));
   const ceiling = capBidByFailureRisk(
-    capAmbitiousBid(capFragileSuitBid(initialCeiling, trump, bidShape), hand, trump, quality),
+    capAmbitiousBid(capUnsupportedTrumpBid(capFragileSuitBid(initialCeiling, trump, bidShape), trump, bidShape), hand, trump, quality),
     floor,
     expectedPoints,
     quality,
@@ -1020,6 +1023,29 @@ function makeBidCandidate(trump, raw, hand, personality) {
     shape: bidShape,
     points: hand.filter(isPointCard).length,
   };
+}
+
+function capUnsupportedTrumpBid(ceiling, trump, shape) {
+  if (trump === "NT") {
+    return ceiling;
+  }
+
+  const floor = getOpeningBidFloor(trump);
+  const hasPrimaryControl = shape.hasTrumpAce || shape.hasMighty || shape.hasJoker;
+  if (hasPrimaryControl) {
+    return ceiling;
+  }
+
+  if (shape.trumpLength <= 4) {
+    return floor - 1;
+  }
+  if (shape.trumpLength === 5 && !shape.hasTrumpKing) {
+    return floor - 1;
+  }
+  if (shape.trumpLength === 5) {
+    return Math.min(ceiling, floor);
+  }
+  return Math.min(ceiling, floor + (shape.hasTrumpKing ? 1 : 0));
 }
 
 function getBidShape(hand, trump) {
@@ -1106,13 +1132,38 @@ function capBidByFailureRisk(ceiling, floor, expectedPoints, quality, personalit
       quality,
     };
     const failure = evaluateBidFailureRisk(candidate, capped, personality);
-    const relaxedRequirement = minimumBidSuccessChance(capped, personality) - 0.02;
-    if (failure.successChance >= relaxedRequirement && failure.missBy <= 0.85) {
+    const relaxedRequirement = minimumBidSuccessChance(capped, personality) - (capped >= 16 ? 0 : 0.02);
+    const expectedMargin = expectedPoints - capped;
+    if (
+      failure.successChance >= relaxedRequirement &&
+      failure.missBy <= allowedBidMissBy(capped) &&
+      expectedMargin >= requiredBidPointMargin(capped)
+    ) {
       break;
     }
     capped -= 1;
   }
   return Math.max(floor - 1, capped);
+}
+
+function allowedBidMissBy(target) {
+  if (target >= 17) {
+    return 0.2;
+  }
+  if (target >= 16) {
+    return 0.35;
+  }
+  return 0.85;
+}
+
+function requiredBidPointMargin(target) {
+  if (target >= 17) {
+    return 0.55;
+  }
+  if (target >= 16) {
+    return 0.2;
+  }
+  return -0.85;
 }
 
 function estimateBidExpectedPoints(hand, trump, raw, quality) {
@@ -1514,6 +1565,11 @@ function chooseCpuCard(playerIndex) {
     return null;
   }
 
+  const forcedCard = chooseStrategicOverride(playerIndex, legalCards);
+  if (forcedCard) {
+    return forcedCard;
+  }
+
   const candidates = legalCards
     .map((card) => ({
       card,
@@ -1522,6 +1578,183 @@ function chooseCpuCard(playerIndex) {
     .sort((a, b) => b.score - a.score || defensiveDiscardCost(a.card) - defensiveDiscardCost(b.card));
 
   return candidates[0].card;
+}
+
+function chooseStrategicOverride(playerIndex, legalCards) {
+  if (state.trick.length === 0) {
+    return chooseLeadOverride(playerIndex, legalCards);
+  }
+  return chooseFollowOverride(playerIndex, legalCards);
+}
+
+function chooseLeadOverride(playerIndex, legalCards) {
+  if (isJokerPowerless() && legalCards.length > 1 && legalCards.some((card) => !card.joker)) {
+    return lowestSacrifice(legalCards.filter((card) => !card.joker));
+  }
+
+  if (shouldReturnTrumpToDeclarer(playerIndex, legalCards)) {
+    return lowestOrdinaryTrump(legalCards);
+  }
+
+  const ordinaryTrumps = legalCards.filter(isOrdinaryTrump);
+  if (shouldLeadOrdinaryTrumpBeforeControl(playerIndex, ordinaryTrumps)) {
+    return lowestOrdinaryTrump(ordinaryTrumps);
+  }
+
+  const earlyExit = chooseEarlyLowExitBeforeControl(playerIndex, legalCards);
+  if (earlyExit) {
+    return earlyExit;
+  }
+
+  return null;
+}
+
+function chooseFollowOverride(playerIndex, legalCards) {
+  if (!isJokerEffective() && legalCards.some((card) => !card.joker)) {
+    return lowestSacrifice(legalCards.filter((card) => !card.joker));
+  }
+
+  const leadSuit = getLeadSuit();
+  const currentWinner = getTrickWinner([...state.trick]);
+  const currentWinnerSide = getSideForAi(currentWinner);
+  const playerSide = getSideForAi(playerIndex);
+  const ordinaryTrumps = legalCards.filter(isOrdinaryTrump);
+
+  if (state.trump !== "NT" && leadSuit === state.trump && ordinaryTrumps.length) {
+    const trumpFollow = chooseTrumpFollowOverride(playerIndex, ordinaryTrumps, currentWinner, currentWinnerSide, playerSide);
+    if (trumpFollow) {
+      return trumpFollow;
+    }
+  }
+
+  if (currentWinnerSide !== playerSide || !isCurrentTrickSecureForSide(currentWinner)) {
+    return null;
+  }
+
+  const nonWinningCards = legalCards.filter(
+    (card) => getTrickWinner([...state.trick, { playerIndex, card }]) !== playerIndex,
+  );
+  if (!nonWinningCards.length) {
+    return null;
+  }
+
+  return chooseSupportDiscard(nonWinningCards);
+}
+
+function chooseTrumpFollowOverride(playerIndex, ordinaryTrumps, currentWinner, currentWinnerSide, playerSide) {
+  const existingPoints = state.trick.filter((entry) => isPointCard(entry.card)).length;
+  const finalSeat = state.trick.length === 4;
+  const winningTrumps = ordinaryTrumps.filter(
+    (card) => getTrickWinner([...state.trick, { playerIndex, card }]) === playerIndex,
+  );
+
+  if (currentWinnerSide === playerSide) {
+    return isCurrentTrickSecureForSide(currentWinner)
+      ? chooseSupportDiscard(ordinaryTrumps)
+      : lowestOrdinaryTrump(ordinaryTrumps);
+  }
+
+  if (winningTrumps.length && (existingPoints > 0 || finalSeat)) {
+    return cheapestWinningCard(winningTrumps);
+  }
+
+  if (!winningTrumps.length && existingPoints <= 1 && !shouldSpendControlForCurrentTrick(playerIndex, existingPoints)) {
+    return lowestOrdinaryTrump(ordinaryTrumps);
+  }
+
+  return null;
+}
+
+function shouldLeadOrdinaryTrumpBeforeControl(playerIndex, ordinaryTrumps) {
+  if (
+    playerIndex !== state.declarerIndex ||
+    state.trump === "NT" ||
+    state.trickNumber <= 1 ||
+    state.trickNumber >= 8 ||
+    ordinaryTrumps.length < 2
+  ) {
+    return false;
+  }
+
+  const hand = state.hands[playerIndex] || [];
+  const declarerNeed = Math.max(0, state.target - getDeclarerTeamPointsForAi(playerIndex));
+  if (declarerNeed <= 0) {
+    return false;
+  }
+
+  const hasControlBehindTrump =
+    hand.some((card) => isMighty(card, state.trump)) ||
+    hand.some((card) => card.joker && isJokerEffective()) ||
+    ordinaryTrumps.some((card) => card.rank >= 12);
+  return hasControlBehindTrump;
+}
+
+function chooseEarlyLowExitBeforeControl(playerIndex, legalCards) {
+  if (state.trickNumber >= 7) {
+    return null;
+  }
+
+  const controlCards = legalCards.filter((card) => card.joker || isMighty(card, state.trump));
+  if (!controlCards.length || !controlCards.some((card) => shouldLeadControlCard(card, playerIndex))) {
+    return null;
+  }
+  if (shouldForceTempoLead(playerIndex)) {
+    return null;
+  }
+
+  const lowExitCards = legalCards.filter((card) => !isSpecial(card) && !isPointCard(card));
+  if (!lowExitCards.length) {
+    return null;
+  }
+  return lowestSacrifice(lowExitCards);
+}
+
+function shouldForceTempoLead(playerIndex) {
+  if (!isDeclarerSideForAi(playerIndex)) {
+    return false;
+  }
+  const declarerNeed = Math.max(0, state.target - getDeclarerTeamPointsForAi(playerIndex));
+  const remainingTricks = Math.max(1, 11 - state.trickNumber);
+  const handPoints = (state.hands[playerIndex] || []).filter(isPointCard).length;
+  return declarerNeed > remainingTricks * 2.25 || (state.target >= 17 && state.trickNumber >= 6 && handPoints >= 3);
+}
+
+function isCurrentTrickSecureForSide(currentWinner) {
+  if (state.trick.length === 4) {
+    return true;
+  }
+  const winningCard = state.trick.find((entry) => entry.playerIndex === currentWinner)?.card;
+  return Boolean(winningCard) && cardPower(winningCard, getLeadSuit()) >= 900;
+}
+
+function chooseSupportDiscard(cards) {
+  const pointCards = cards
+    .filter((card) => isPointCard(card) && !isSpecial(card))
+    .sort((a, b) => pointDumpValue(b) - pointDumpValue(a));
+  if (pointCards.length) {
+    return pointCards[0];
+  }
+  return lowestSacrifice(cards);
+}
+
+function lowestOrdinaryTrump(cards) {
+  return cards
+    .filter(isOrdinaryTrump)
+    .sort((a, b) => Number(isPointCard(a)) - Number(isPointCard(b)) || a.rank - b.rank)[0] || null;
+}
+
+function cheapestWinningCard(cards) {
+  return cards.slice().sort((a, b) => aiCardSpendCost(a) - aiCardSpendCost(b))[0] || null;
+}
+
+function shouldSpendControlForCurrentTrick(playerIndex, existingPoints) {
+  if (existingPoints >= 2) {
+    return true;
+  }
+  const playerSide = getSideForAi(playerIndex);
+  const currentWinner = getTrickWinner([...state.trick]);
+  const currentWinnerSide = getSideForAi(currentWinner);
+  return getMightyPointUrgency(playerIndex, playerSide, currentWinnerSide, existingPoints) >= 48;
 }
 
 function evaluateCpuCardChoice(playerIndex, card, legalCards) {
@@ -1652,12 +1885,20 @@ function evaluateTrickResponseDiscipline(playerIndex, card, legalCards, currentW
   if (currentWinnerSide === playerSide && winsWithCard && currentWinner !== playerIndex) {
     const currentWinnerCard = state.trick.find((entry) => entry.playerIndex === currentWinner)?.card;
     const secureAllyTrick = state.trick.length === 4 || (currentWinnerCard && cardPower(currentWinnerCard, getLeadSuit()) >= 900);
+    const nonWinningAlternative = legalCards.some(
+      (candidate) =>
+        candidate.id !== card.id &&
+        getTrickWinner([...state.trick, { playerIndex, card: candidate }]) !== playerIndex,
+    );
     score -= 56 + aiCardSpendCost(card) * (trickPoints > 0 ? 0.22 : 0.34);
     if (isControlCard(card)) {
       score -= secureAllyTrick ? 84 : 52;
     }
     if ((card.joker || isMighty(card, state.trump)) && existingTrickPoints === 0) {
       score -= 65;
+    }
+    if (existingTrickPoints === 0 && nonWinningAlternative) {
+      score -= isControlCard(card) ? 72 : 28;
     }
   }
 
