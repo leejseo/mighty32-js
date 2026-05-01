@@ -52,6 +52,7 @@ const MIN_TARGET = 13;
 const MIN_NO_TRUMP_TARGET = 12;
 const CPU_DELAY = 4500;
 const TRICK_RESOLVE_DELAY = 950;
+const TRICK_TREE_WEIGHT = 0.42;
 const BASE_BID_PERSONALITIES = [
   { aggression: 0, noTrumpBias: 0, discipline: 0.62, stretch: 0 },
   { aggression: -0.04, noTrumpBias: -0.05, discipline: 0.64, stretch: -0.04 },
@@ -1094,11 +1095,13 @@ function chooseCpuFriendCandidate(declarerIndex, candidates) {
   if (!candidates.length) {
     return null;
   }
-  if (state.target >= 18) {
+  const bestPriority = candidates[0].priority;
+  const nextPriority = candidates[1]?.priority ?? -Infinity;
+  if (state.target >= 17 || bestPriority >= 128 || bestPriority - nextPriority >= 5) {
     return candidates[0];
   }
+
   const personality = getBidPersonality(declarerIndex);
-  const bestPriority = candidates[0].priority;
   const window = Math.max(1, 2.5 + personality.aggression * 8 + personality.stretch * 4);
   const elite = candidates.filter((candidate) => candidate.priority >= bestPriority - window);
   if (elite.length === 1) {
@@ -1123,11 +1126,11 @@ function friendPriority(card, declarerIndex = state.declarerIndex) {
   const declarerHasJoker = hand.some((item) => item.joker);
   const declarerHasMighty = hand.some((item) => isMighty(item, state.trump));
 
-  if (card.joker) {
-    return 126 + (declarerHasMighty ? 0 : 4) + targetPressure * 8;
-  }
   if (isMighty(card, state.trump)) {
-    return 122 + (declarerHasJoker ? 0 : 3) + targetPressure * 7;
+    return 136 + (declarerHasJoker ? 2 : 8) + targetPressure * 8;
+  }
+  if (card.joker) {
+    return 124 + (declarerHasMighty ? 9 : -5) + targetPressure * 7;
   }
 
   const isTrumpSuit = state.trump !== "NT" && card.suit === state.trump;
@@ -1409,6 +1412,7 @@ function evaluateCpuCardChoice(playerIndex, card, legalCards) {
   const late = state.trickNumber >= 8;
   const finalSeat = state.trick.length === 4;
   const spent = aiCardSpendCost(card);
+  const treeScore = evaluateCurrentTrickTree(playerIndex, card, playerSide);
   let score = 0;
 
   if (playerSide === "declarer") {
@@ -1443,6 +1447,8 @@ function evaluateCpuCardChoice(playerIndex, card, legalCards) {
   if (state.trick.length === 0) {
     score += evaluateLeadPlan(playerIndex, card, outcome, legalCards);
   }
+
+  score += treeScore * TRICK_TREE_WEIGHT;
 
   if (card.joker && !isJokerEffective()) {
     score -= legalCards.some((item) => !item.joker) ? 80 : 0;
@@ -1484,6 +1490,7 @@ function evaluateLeadPlan(playerIndex, card, outcome, legalCards) {
   }
   if (!isSpecial(card) && !isPointCard(card)) {
     score += Math.max(0, 4 - (suitCounts[card.suit] || 0)) * 1.8;
+    score += Math.max(0, 10 - card.rank) * (card.suit === state.trump ? 0.45 : 0.9);
   }
   if (isPointCard(card) && winnerSide !== playerSide) {
     score -= 14;
@@ -1493,6 +1500,37 @@ function evaluateLeadPlan(playerIndex, card, outcome, legalCards) {
   }
   if (card.joker && legalCards.some((item) => item !== card && !item.joker && !isPointCard(item))) {
     score -= state.trickNumber <= 5 ? 12 : 4;
+  }
+  score += evaluateFriendLeadDiscipline(playerIndex, card, legalCards);
+  return score;
+}
+
+function evaluateFriendLeadDiscipline(playerIndex, card, legalCards) {
+  if (!isFriendPlayerForAi(playerIndex)) {
+    return 0;
+  }
+
+  let score = 0;
+  if (shouldReturnTrumpToDeclarer(playerIndex, legalCards)) {
+    if (isOrdinaryTrump(card)) {
+      score += 40 + Math.max(0, 14 - card.rank) * 1.8 - (isPointCard(card) ? 11 : 0);
+    } else if (card.joker || isMighty(card, state.trump)) {
+      score -= 72;
+    } else if (isControlCard(card)) {
+      score -= 30;
+    } else {
+      score -= 10;
+    }
+  }
+
+  if (isMighty(card, state.trump) && !shouldLeadMightyAsFriend(playerIndex, legalCards)) {
+    score -= 68;
+  }
+  if (card.joker && !shouldLeadJokerAsFriend(playerIndex, legalCards)) {
+    score -= 52;
+  }
+  if (!isSpecial(card) && card.rank === 14 && card.suit !== state.trump && state.trickNumber <= 6) {
+    score -= 12;
   }
   return score;
 }
@@ -1525,6 +1563,143 @@ function simulateTrickAfterPlay(playerIndex, card) {
   const winner = getTrickWinnerForContext(trick, jokerLeadSuit, state.trickNumber);
   const points = trick.filter((entry) => isPointCard(entry.card)).length;
   return { winner, points, trick };
+}
+
+function evaluateCurrentTrickTree(playerIndex, card, perspectiveSide) {
+  const jokerLeadSuit = state.trick.length === 0 && card.joker
+    ? chooseJokerLeadSuitForSim(playerIndex)
+    : state.jokerLeadSuit;
+  const jokerCallActive = state.trick.length === 0 && isJokerCall(card)
+    ? shouldUseJokerCall(playerIndex, card)
+    : state.jokerCallActive;
+  const trick = [...state.trick, { playerIndex, card }];
+  if (trick.length === 5) {
+    return scoreTrickTreeTerminal(trick, jokerLeadSuit, perspectiveSide, playerIndex);
+  }
+
+  const usedIds = new Set(trick.map((entry) => entry.card.id));
+  return minimaxTrickNode(
+    nextPlayer(playerIndex),
+    trick,
+    usedIds,
+    jokerLeadSuit,
+    jokerCallActive,
+    perspectiveSide,
+    playerIndex,
+    -Infinity,
+    Infinity,
+  );
+}
+
+function minimaxTrickNode(
+  playerIndex,
+  trick,
+  usedIds,
+  jokerLeadSuit,
+  jokerCallActive,
+  perspectiveSide,
+  observerIndex,
+  alpha,
+  beta,
+) {
+  if (trick.length === 5) {
+    return scoreTrickTreeTerminal(trick, jokerLeadSuit, perspectiveSide, observerIndex);
+  }
+
+  const hand = (state.hands[playerIndex] || []).filter((card) => !usedIds.has(card.id));
+  const legalCards = getLegalCardsForSim(playerIndex, hand, trick, jokerLeadSuit, jokerCallActive);
+  if (!legalCards.length) {
+    return scoreTrickTreeTerminal(trick, jokerLeadSuit, perspectiveSide, observerIndex);
+  }
+
+  const maximizing = getSideForAi(playerIndex) === perspectiveSide;
+  const orderedCards = orderTrickTreeCards(playerIndex, legalCards, trick, jokerLeadSuit);
+  let best = maximizing ? -Infinity : Infinity;
+
+  for (const nextCard of orderedCards) {
+    trick.push({ playerIndex, card: nextCard });
+    usedIds.add(nextCard.id);
+    const childScore =
+      minimaxTrickNode(
+        nextPlayer(playerIndex),
+        trick,
+        usedIds,
+        jokerLeadSuit,
+        jokerCallActive,
+        perspectiveSide,
+        observerIndex,
+        alpha,
+        beta,
+      ) + trickTreeSpendAdjustment(playerIndex, nextCard, perspectiveSide, trick);
+    usedIds.delete(nextCard.id);
+    trick.pop();
+
+    if (maximizing) {
+      best = Math.max(best, childScore);
+      alpha = Math.max(alpha, best);
+      if (beta <= alpha) {
+        break;
+      }
+    } else {
+      best = Math.min(best, childScore);
+      beta = Math.min(beta, best);
+      if (beta <= alpha) {
+        break;
+      }
+    }
+  }
+
+  return best;
+}
+
+function orderTrickTreeCards(playerIndex, legalCards, trick, jokerLeadSuit) {
+  const currentWinner = getTrickWinnerForContext(trick, jokerLeadSuit, state.trickNumber);
+  const currentWinnerSide = getSideForAi(currentWinner);
+  const playerSide = getSideForAi(playerIndex);
+  const trickPoints = trick.filter((entry) => isPointCard(entry.card)).length;
+  const remainingAfter = 4 - trick.length;
+  return legalCards
+    .slice()
+    .sort((a, b) => {
+      const scoreA = evaluateSimulatedResponse(playerIndex, a, trick, jokerLeadSuit, currentWinnerSide, playerSide, trickPoints, remainingAfter);
+      const scoreB = evaluateSimulatedResponse(playerIndex, b, trick, jokerLeadSuit, currentWinnerSide, playerSide, trickPoints, remainingAfter);
+      return scoreB - scoreA || aiCardSpendCost(a) - aiCardSpendCost(b);
+    });
+}
+
+function trickTreeSpendAdjustment(playerIndex, card, perspectiveSide, trick) {
+  const sameSide = getSideForAi(playerIndex) === perspectiveSide;
+  const pointsWithCard = trick.filter((entry) => isPointCard(entry.card)).length;
+  const factor = pointsWithCard > 0 ? 0.025 : 0.075;
+  return (sameSide ? -1 : 1) * aiCardSpendCost(card) * factor;
+}
+
+function scoreTrickTreeTerminal(trick, jokerLeadSuit, perspectiveSide, observerIndex) {
+  const winner = getTrickWinnerForContext(trick, jokerLeadSuit, state.trickNumber);
+  const winnerSide = getSideForAi(winner);
+  const points = trick.filter((entry) => isPointCard(entry.card)).length;
+  const declarerPoints = getDeclarerTeamPointsForAi(observerIndex);
+  const declarerNeed = Math.max(0, state.target - declarerPoints);
+  const perspectiveWins = winnerSide === perspectiveSide;
+  const effectivePoints = Math.min(points, Math.max(1, declarerNeed));
+  let score = perspectiveWins ? 16 : -16;
+
+  if (perspectiveSide === "declarer") {
+    score += winnerSide === "declarer" ? effectivePoints * 7.5 : -effectivePoints * 7.5;
+    if (declarerNeed <= points && winnerSide === "declarer") {
+      score += 9;
+    }
+  } else {
+    score += winnerSide === "declarer" ? -effectivePoints * 7.8 : effectivePoints * 7.2;
+    if (declarerNeed <= points && winnerSide !== "declarer") {
+      score += 8;
+    }
+  }
+
+  if (points === 0) {
+    score += perspectiveWins ? 1.5 : -1.5;
+  }
+  return score;
 }
 
 function getLegalCardsForSim(playerIndex, hand, trick, jokerLeadSuit, jokerCallActive = state.jokerCallActive) {
@@ -1606,6 +1781,10 @@ function getSideForAi(playerIndex) {
   return isDeclarerSideForAi(playerIndex) ? "declarer" : "defense";
 }
 
+function isFriendPlayerForAi(playerIndex) {
+  return playerIndex !== state.declarerIndex && getFriendOwnerIndex() === playerIndex;
+}
+
 function aiCardSpendCost(card) {
   if (card.joker) {
     return isJokerEffective() ? 92 : 8;
@@ -1625,6 +1804,11 @@ function aiCardSpendCost(card) {
 function chooseLeadCard(playerIndex, legalCards) {
   if (isJokerPowerless() && legalCards.length > 1 && legalCards.some((card) => !card.joker)) {
     legalCards = legalCards.filter((card) => !card.joker);
+  }
+  if (shouldReturnTrumpToDeclarer(playerIndex, legalCards)) {
+    return legalCards
+      .filter(isOrdinaryTrump)
+      .sort((a, b) => a.rank - b.rank || defensiveDiscardCost(a) - defensiveDiscardCost(b))[0];
   }
   const handPoints = state.hands[playerIndex].filter(isPointCard).length;
   const declarerPoints = getDeclarerTeamPointsForAi(playerIndex);
@@ -1694,6 +1878,14 @@ function shouldSpendJokerToWin(playerIndex, trickPoints, remainingAfterMe) {
 }
 
 function shouldLeadControlCard(card, playerIndex) {
+  if (isFriendPlayerForAi(playerIndex)) {
+    if (isMighty(card, state.trump)) {
+      return shouldLeadMightyAsFriend(playerIndex);
+    }
+    if (card.joker) {
+      return shouldLeadJokerAsFriend(playerIndex);
+    }
+  }
   if (!card.joker) {
     return true;
   }
@@ -1706,6 +1898,43 @@ function shouldLeadControlCard(card, playerIndex) {
     return false;
   }
   return isDeclarerSideForAi(playerIndex) || pointCards >= 2 || state.trickNumber <= 6;
+}
+
+function shouldReturnTrumpToDeclarer(playerIndex, legalCards = []) {
+  if (!isFriendPlayerForAi(playerIndex) || state.trump === "NT" || state.trick.length > 0 || state.trickNumber >= 9) {
+    return false;
+  }
+  return legalCards.some((card) => isOrdinaryTrump(card));
+}
+
+function shouldLeadMightyAsFriend(playerIndex, legalCards = []) {
+  if (!isFriendPlayerForAi(playerIndex)) {
+    return true;
+  }
+  if (shouldReturnTrumpToDeclarer(playerIndex, legalCards)) {
+    return false;
+  }
+  const hand = state.hands[playerIndex] || [];
+  const handPoints = hand.filter(isPointCard).length;
+  const hasEffectiveJoker = isJokerEffective() && hand.some((card) => card.joker);
+  if (state.trickNumber >= 9) {
+    return true;
+  }
+  if (state.trickNumber >= 8 && handPoints >= 2) {
+    return true;
+  }
+  return state.trickNumber >= 7 && handPoints >= 3 && hasEffectiveJoker;
+}
+
+function shouldLeadJokerAsFriend(playerIndex, legalCards = []) {
+  if (!isFriendPlayerForAi(playerIndex)) {
+    return true;
+  }
+  if (!isJokerEffective() || shouldReturnTrumpToDeclarer(playerIndex, legalCards)) {
+    return false;
+  }
+  const handPoints = (state.hands[playerIndex] || []).filter(isPointCard).length;
+  return state.trickNumber >= 8 || handPoints >= 3;
 }
 
 function lowestSacrifice(cards) {
