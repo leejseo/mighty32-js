@@ -472,6 +472,13 @@ button.card.is-pressed {
   outline: 2px solid #111111;
 }
 
+.card.is-joker-call {
+  outline: 3px solid var(--gold);
+  box-shadow:
+    0 0 0 1px #000000,
+    1px 2px 0 rgba(0, 0, 0, 0.35);
+}
+
 .card-rank {
   display: block;
   min-width: 2ch;
@@ -506,6 +513,17 @@ button.card.is-pressed {
   font-weight: 700;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+.card.is-joker-call .card-tag {
+  left: 3px;
+  right: 3px;
+  max-width: none;
+  padding: 1px 2px;
+  color: #111111;
+  text-align: center;
+  background: var(--gold);
+  border: 1px solid #111111;
 }
 
 .trick-area {
@@ -565,6 +583,20 @@ button.card.is-pressed {
 .slot-label {
   min-height: 18px;
   font-size: 12px;
+}
+
+.trick-slot.is-joker-call-slot .slot-label {
+  color: #ffe98a;
+}
+
+.joker-call-banner {
+  padding: 2px 7px;
+  color: #111111;
+  font-size: 12px;
+  font-weight: 700;
+  text-shadow: none;
+  background: var(--gold);
+  border: 1px solid #111111;
 }
 
 .empty-card {

@@ -1442,6 +1442,7 @@ function evaluateCpuCardChoice(playerIndex, card, legalCards) {
         score += 6;
       }
     }
+    score += evaluateTrickResponseDiscipline(playerIndex, card, legalCards, currentWinner, currentWinnerSide);
   }
 
   if (state.trick.length === 0) {
@@ -1501,8 +1502,112 @@ function evaluateLeadPlan(playerIndex, card, outcome, legalCards) {
   if (card.joker && legalCards.some((item) => item !== card && !item.joker && !isPointCard(item))) {
     score -= state.trickNumber <= 5 ? 12 : 4;
   }
+  score += evaluateDeclarerLeadPlan(playerIndex, card, legalCards);
+  score += evaluateDefenseLeadPlan(playerIndex, card, legalCards);
+  score += evaluateJokerCallLeadPlan(playerIndex, card);
   score += evaluateFriendLeadDiscipline(playerIndex, card, legalCards);
   return score;
+}
+
+function evaluateTrickResponseDiscipline(playerIndex, card, legalCards, currentWinner, currentWinnerSide) {
+  const playerSide = getSideForAi(playerIndex);
+  const preview = [...state.trick, { playerIndex, card }];
+  const winner = getTrickWinner(preview);
+  const winsWithCard = winner === playerIndex;
+  const trickPoints = state.trick.filter((entry) => isPointCard(entry.card)).length + (isPointCard(card) ? 1 : 0);
+  let score = 0;
+
+  if (currentWinnerSide === playerSide && winsWithCard && currentWinner !== playerIndex) {
+    score -= 20 + aiCardSpendCost(card) * (trickPoints > 0 ? 0.04 : 0.09);
+  }
+
+  if (!winsWithCard) {
+    return score;
+  }
+
+  const cheapestWinner = legalCards
+    .filter((candidate) => getTrickWinner([...state.trick, { playerIndex, card: candidate }]) === playerIndex)
+    .sort((a, b) => aiCardSpendCost(a) - aiCardSpendCost(b))[0];
+  if (!cheapestWinner || cheapestWinner.id === card.id) {
+    return score;
+  }
+
+  const overpay = Math.max(0, aiCardSpendCost(card) - aiCardSpendCost(cheapestWinner));
+  const finalSeat = state.trick.length === 4;
+  const rate = trickPoints > 0 ? 0.07 : 0.18;
+  score -= overpay * (finalSeat ? rate * 0.65 : rate);
+  return score;
+}
+
+function evaluateDeclarerLeadPlan(playerIndex, card, legalCards) {
+  if (playerIndex !== state.declarerIndex || state.trump === "NT" || state.trickNumber === 1) {
+    return 0;
+  }
+  const ordinaryTrumps = legalCards.filter(isOrdinaryTrump);
+  if (!ordinaryTrumps.length || !shouldDeclarerDrawTrump(playerIndex, ordinaryTrumps)) {
+    return 0;
+  }
+  if (isOrdinaryTrump(card)) {
+    return 24 + Math.max(0, 14 - card.rank) * 1.4 - (isPointCard(card) ? 8 : 0);
+  }
+  if (card.joker || isMighty(card, state.trump)) {
+    return -8;
+  }
+  return -7;
+}
+
+function shouldDeclarerDrawTrump(playerIndex, ordinaryTrumps) {
+  const hand = state.hands[playerIndex] || [];
+  const shape = getBidShape(hand, state.trump);
+  const declarerPoints = getDeclarerTeamPointsForAi(playerIndex);
+  if (declarerPoints >= state.target || state.trickNumber >= 8) {
+    return false;
+  }
+  if (ordinaryTrumps.length >= 3 && (shape.hasMighty || shape.hasJoker || shape.hasTopTrump)) {
+    return true;
+  }
+  return ordinaryTrumps.length >= 2 && shape.hasBothTrumpAk;
+}
+
+function evaluateDefenseLeadPlan(playerIndex, card, legalCards) {
+  if (getSideForAi(playerIndex) !== "defense") {
+    return 0;
+  }
+  let score = 0;
+  const declarerNeed = Math.max(0, state.target - getDeclarerTeamPointsForAi(playerIndex));
+  if (isOrdinaryTrump(card)) {
+    score -= state.trickNumber <= 7 && declarerNeed > 3 ? 18 : 7;
+  }
+  if (!isSpecial(card) && card.suit !== state.trump && card.rank === 14) {
+    score += canPlayerFollowSuitInActualHand(state.declarerIndex, card.suit) ? 8 : -16;
+  }
+  if (!isSpecial(card) && !isPointCard(card) && card.suit !== state.trump) {
+    const suitCount = (getSuitCounts(state.hands[playerIndex] || [])[card.suit] || 0);
+    score += Math.max(0, 4 - suitCount) * 1.2;
+  }
+  if (legalCards.some((candidate) => isJokerCall(candidate)) && card.joker) {
+    score -= 12;
+  }
+  return score;
+}
+
+function evaluateJokerCallLeadPlan(playerIndex, card) {
+  if (!isJokerCall(card) || !canUseJokerCallAsLead(playerIndex, card) || !isJokerEffective()) {
+    return 0;
+  }
+  const jokerOwner = getCardOwnerIndex("JOKER");
+  if (jokerOwner === null || jokerOwner === playerIndex) {
+    return 0;
+  }
+  const playerSide = getSideForAi(playerIndex);
+  const jokerOwnerSide = getSideForAi(jokerOwner);
+  if (playerSide === jokerOwnerSide) {
+    return -38;
+  }
+  if (shouldUseJokerCall(playerIndex, card)) {
+    return state.trickNumber <= 8 ? 34 : 18;
+  }
+  return 10;
 }
 
 function evaluateFriendLeadDiscipline(playerIndex, card, legalCards) {
@@ -2039,6 +2144,7 @@ function playCard(playerIndex, cardId) {
     render();
     return false;
   }
+  let declaredJokerCall = false;
   if (state.phase === "playing" && state.trick.length === 0) {
     if (card.joker && !state.jokerLeadSuit) {
       setJokerLeadSuit(playerIndex, chooseJokerLeadSuit(playerIndex));
@@ -2047,12 +2153,17 @@ function playCard(playerIndex, cardId) {
       state.jokerCallActive = playerIndex === HUMAN
         ? state.jokerCallActive && canUseJokerCallAsLead(playerIndex, card)
         : shouldUseJokerCall(playerIndex, card);
+      declaredJokerCall = state.jokerCallActive;
     } else {
       state.jokerCallActive = false;
     }
   }
   hand.splice(cardIndex, 1);
   state.trick.push({ playerIndex, card });
+
+  if (declaredJokerCall) {
+    addLog(`${PLAYER_NAMES[playerIndex]}이 조커콜을 선언했습니다.`);
+  }
 
   if (state.friendCardId && card.id === state.friendCardId && !state.friendRevealed) {
     state.friendIndex = playerIndex;
@@ -2414,12 +2525,37 @@ function getFriendOwnerIndex() {
   return null;
 }
 
+function getCardOwnerIndex(cardId) {
+  for (let i = 0; i < state.hands.length; i += 1) {
+    if (state.hands[i].some((card) => card.id === cardId)) {
+      return i;
+    }
+  }
+  const trickEntry = state.trick.find((entry) => entry.card.id === cardId);
+  if (trickEntry) {
+    return trickEntry.playerIndex;
+  }
+  for (let i = 0; i < state.captured.length; i += 1) {
+    if (state.captured[i].some((card) => card.id === cardId)) {
+      return i;
+    }
+  }
+  if (state.buried.some((card) => card.id === cardId)) {
+    return state.declarerIndex;
+  }
+  return null;
+}
+
 function isDeclarerSideForAi(playerIndex) {
   if (playerIndex === state.declarerIndex) {
     return true;
   }
   const friendOwner = getFriendOwnerIndex();
   return friendOwner !== null && playerIndex === friendOwner;
+}
+
+function canPlayerFollowSuitInActualHand(playerIndex, suit) {
+  return Boolean(suit) && handHasFollowSuit(state.hands[playerIndex] || [], suit);
 }
 
 function isSameAiTeam(a, b) {
@@ -2947,10 +3083,12 @@ function renderTrickArea() {
         const label = entry
           ? `${name}${entry.card.joker && state.jokerLeadSuit ? ` · ${SUIT_LABELS[state.jokerLeadSuit]}` : ""}${isJokerCallLeadEntry ? " · 조커콜" : ""}`
           : "";
+        const slotClass = `trick-slot${isJokerCallLeadEntry ? " is-joker-call-slot" : ""}`;
         return `
-          <div class="trick-slot" data-slot="${index}">
+          <div class="${slotClass}" data-slot="${index}">
             <div class="slot-label">${escapeHtml(label)}</div>
-            ${entry ? renderCard(entry.card, "", true) : `<div class="empty-card"></div>`}
+            ${isJokerCallLeadEntry ? `<div class="joker-call-banner">조커콜 선언</div>` : ""}
+            ${entry ? renderCard(entry.card, isJokerCallLeadEntry ? "is-joker-call" : "", true, isJokerCallLeadEntry ? "조커콜" : null) : `<div class="empty-card"></div>`}
           </div>
         `;
       }).join("")}
@@ -2958,10 +3096,10 @@ function renderTrickArea() {
   `;
 }
 
-function renderCard(card, extraClass = "", inert = false) {
+function renderCard(card, extraClass = "", inert = false, tagOverride = null) {
   const red = card.suit === "D" || card.suit === "H";
   const classes = ["card", red ? "is-red" : "", card.joker ? "is-joker" : "", extraClass].filter(Boolean).join(" ");
-  const tag = isMighty(card, state.trump) ? "MIGHTY" : card.joker ? "JOKER" : "";
+  const tag = tagOverride ?? (isMighty(card, state.trump) ? "MIGHTY" : card.joker ? "JOKER" : "");
   const content = card.joker
     ? `
       <span class="card-rank">JOKER</span>
@@ -2988,22 +3126,29 @@ function renderInlineCard(card) {
 
 function renderScorePanel() {
   const declarerPoints = getKnownDeclarerTeamPointsForHuman();
+  const humanCanSeeBuried = canHumanSeeBuried();
+  const scoreLabel = state.declarerIndex === null || humanCanSeeBuried ? "주공 팀 점수" : "주공 팀 공개 점수";
   const buriedPointText = state.declarerIndex === null
     ? "-"
-    : canHumanSeeBuried()
+    : humanCanSeeBuried
       ? state.buried.filter(isPointCard).length
       : "비공개";
+  const buriedVisibilityNote = state.declarerIndex !== null
+    ? humanCanSeeBuried
+      ? "위 주공 팀 점수에는 바닥 점수가 포함됩니다."
+      : "주공이 아니면 바닥 점수는 종료 전까지 비공개이며, 공개 점수에는 바닥 점수가 포함되지 않습니다."
+    : "점수 카드는 A, K, Q, J, 10입니다. 조커는 점수 카드가 아닙니다.";
   return `
     <dl class="score-grid">
       <dt>단계</dt><dd>${phaseLabel(state.phase)}</dd>
       <dt>주공</dt><dd>${state.declarerIndex === null ? "-" : PLAYER_NAMES[state.declarerIndex]}</dd>
       <dt>기루</dt><dd>${state.declarerIndex === null ? "-" : `${SUIT_LABELS[state.trump]} ${SUIT_NAMES[state.trump]}`}</dd>
       <dt>목표</dt><dd>${state.declarerIndex === null ? "-" : state.target}</dd>
-      <dt>주공 팀 점수</dt><dd>${state.declarerIndex === null ? "-" : declarerPoints}</dd>
+      <dt>${scoreLabel}</dt><dd>${state.declarerIndex === null ? "-" : declarerPoints}</dd>
       <dt>프렌드</dt><dd>${renderFriendLabel()}</dd>
       <dt>바닥 점수</dt><dd>${buriedPointText}</dd>
     </dl>
-    <p class="compact section-gap">점수 카드는 A, K, Q, J, 10입니다. 조커는 점수 카드가 아닙니다.</p>
+    <p class="compact section-gap">${escapeHtml(buriedVisibilityNote)}</p>
   `;
 }
 
