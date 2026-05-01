@@ -451,17 +451,21 @@ function contractMatchesCurrent(candidate) {
 }
 
 function contractAdjustmentAllowed(candidate) {
-  return contractMatchesCurrent(candidate) || bidBeats(candidate, state.currentBid);
+  if (!state.currentBid) {
+    return true;
+  }
+  return candidate.target >= getMinimumContractAdjustment(candidate.trump) && candidate.target <= MAX_TARGET;
 }
 
 function getMinimumContractAdjustment(trump = state.trump) {
-  const floor = getOpeningBidFloor(trump);
-  for (let target = floor; target <= MAX_TARGET; target += 1) {
-    if (contractAdjustmentAllowed({ trump, target })) {
-      return target;
-    }
+  if (!state.currentBid) {
+    return getOpeningBidFloor(trump);
   }
-  return MAX_TARGET + 1;
+  const floor = getOpeningBidFloor(trump);
+  const minTarget = trump === state.currentBid.trump
+    ? state.currentBid.target
+    : state.currentBid.target + 2;
+  return Math.max(floor, minTarget);
 }
 
 function getBidPower(bid) {
@@ -504,6 +508,10 @@ function updateContractTargetBounds() {
   const minTarget = getMinimumContractAdjustment(trumpInput.value);
   targetInput.min = String(minTarget);
   targetInput.disabled = minTarget > MAX_TARGET;
+  const minimumText = document.querySelector("#contract-minimum");
+  if (minimumText) {
+    minimumText.textContent = minTarget > MAX_TARGET ? "불가" : `${minTarget}점`;
+  }
   const confirmButton = document.querySelector('[data-action="confirm-contract"]');
   if (confirmButton) {
     confirmButton.disabled = minTarget > MAX_TARGET;
@@ -835,7 +843,9 @@ function confirmHumanContract() {
     return;
   }
   if (!Number.isInteger(target) || target < minTarget || target > MAX_TARGET || !contractAdjustmentAllowed({ trump, target })) {
-    state.message = "기존 입찰보다 높은 공약이거나 현재 공약 그대로여야 합니다.";
+    state.message = trump === state.currentBid.trump
+      ? `현재 기루를 유지하면 ${minTarget}점 이상이어야 합니다.`
+      : `바닥패 확인 후 기루 변경은 ${minTarget}점 이상이어야 합니다.`;
     render();
     return;
   }
@@ -849,7 +859,7 @@ function confirmHumanContract() {
 function chooseCpuContractAdjustment() {
   const original = { ...state.currentBid };
   const decision = chooseCpuBid(state.declarerIndex);
-  if (decision && bidBeats(decision, original)) {
+  if (decision && bidBeats(decision, original) && contractAdjustmentAllowed(decision)) {
     applyContractAdjustment(state.declarerIndex, decision.trump, decision.target);
     return;
   }
@@ -3294,6 +3304,7 @@ function renderControlPanel() {
       <div class="notice">바닥패를 본 뒤 공약을 유지하거나 더 높은 공약으로 조정할 수 있습니다.</div>
       <dl class="score-grid section-gap">
         <dt>현재 공약</dt><dd>${SUIT_LABELS[state.trump]} ${state.target}</dd>
+        <dt>선택 최소</dt><dd id="contract-minimum">${minTarget > MAX_TARGET ? "불가" : `${minTarget}점`}</dd>
       </dl>
       <div class="control-panel">
         <div class="control-line">
@@ -3313,6 +3324,7 @@ function renderControlPanel() {
             <input id="contract-target" type="number" min="${minTarget}" max="${MAX_TARGET}" value="${state.target}" />
           </label>
         </div>
+        <div class="notice compact">같은 기루는 현재 공약 이상, 기루 변경은 바닥패 확인 후 현재 공약 +2 이상입니다.</div>
         <div class="control-line">
           <button type="button" data-action="confirm-contract">공약 확정</button>
         </div>
