@@ -1,0 +1,9 @@
+{
+  "name": "mighty32-js",
+  "version": "0.1.0",
+  "description": "A lightweight Mighty32-inspired browser card game.",
+  "license": "MIT",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
