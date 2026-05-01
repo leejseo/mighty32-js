@@ -40,7 +40,7 @@ https://leejseo.com/mighty32-js/
 
 `https://leejseo.github.io/mighty32-js/` redirects to the same deployment.
 
-On GitHub Pages, game records are not saved. The app disables the records API, IndexedDB, and localStorage record fallback when it runs on `*.github.io` or the configured Pages custom domain.
+On GitHub Pages, game records are not saved. The Pages workflow writes `pages-config.js` with `window.MIGHTY32_PAGES_MODE = true`, and the app disables the records API, IndexedDB, and localStorage record fallback in that mode. Forks can reuse the same workflow without editing any domain names.
 
 ## Data
 

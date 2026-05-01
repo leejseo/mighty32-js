@@ -43,10 +43,9 @@ const DB_VERSION = 1;
 const STORE_NAME = "games";
 const RECORDS_API_URL = "/api/records";
 const RECORD_LIMIT = 30;
-const STATIC_RECORDS_DISABLED_HOSTS = ["leejseo.com"];
 const IS_STATIC_PAGES_HOST =
-  window.location.hostname.endsWith(".github.io") ||
-  STATIC_RECORDS_DISABLED_HOSTS.includes(window.location.hostname);
+  window.MIGHTY32_PAGES_MODE === true ||
+  window.location.hostname.endsWith(".github.io");
 const HUMAN = 0;
 const MAX_TARGET = 20;
 const MIN_TARGET = 13;
