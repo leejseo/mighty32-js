@@ -30,6 +30,16 @@ http://127.0.0.1:4173/
 PORT=5173 npm start
 ```
 
+## GitHub Pages
+
+This repository includes a GitHub Actions workflow that deploys the static app to GitHub Pages on every push to `main`.
+
+```text
+https://leejseo.github.io/mighty32-js/
+```
+
+On GitHub Pages, game records are not saved. The app disables the records API, IndexedDB, and localStorage record fallback when it runs on `*.github.io`.
+
 ## Data
 
 완료된 게임 기록은 서버 실행 중 `data/games.jsonl`에 저장됩니다. 이 파일은 개인 플레이 기록이므로 Git에는 포함하지 않습니다.

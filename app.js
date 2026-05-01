@@ -43,6 +43,7 @@ const DB_VERSION = 1;
 const STORE_NAME = "games";
 const RECORDS_API_URL = "/api/records";
 const RECORD_LIMIT = 30;
+const IS_GITHUB_PAGES = window.location.hostname.endsWith(".github.io");
 const HUMAN = 0;
 const MAX_TARGET = 20;
 const MIN_TARGET = 13;
@@ -2230,7 +2231,7 @@ function addLog(message) {
 }
 
 async function openRecordsDb() {
-  if (!("indexedDB" in window)) {
+  if (isRecordStorageDisabled() || !("indexedDB" in window)) {
     return null;
   }
   return new Promise((resolve) => {
@@ -2251,6 +2252,9 @@ async function openRecordsDb() {
 }
 
 async function loadRecords() {
+  if (isRecordStorageDisabled()) {
+    return [];
+  }
   const fileRecords = await loadFileRecords();
   if (fileRecords) {
     return fileRecords;
@@ -2271,6 +2275,11 @@ async function loadRecords() {
 }
 
 async function saveRoundRecord(record) {
+  if (isRecordStorageDisabled()) {
+    state.records = [];
+    render();
+    return;
+  }
   if (await saveFileRecord(record)) {
     state.records = await loadRecords();
     render();
@@ -2294,6 +2303,9 @@ async function saveRoundRecord(record) {
 }
 
 async function loadFileRecords() {
+  if (isRecordStorageDisabled()) {
+    return null;
+  }
   try {
     const response = await fetch(RECORDS_API_URL, { cache: "no-store" });
     if (!response.ok) {
@@ -2310,6 +2322,9 @@ async function loadFileRecords() {
 }
 
 async function saveFileRecord(record) {
+  if (isRecordStorageDisabled()) {
+    return false;
+  }
   try {
     const response = await fetch(RECORDS_API_URL, {
       method: "POST",
@@ -2325,6 +2340,9 @@ async function saveFileRecord(record) {
 }
 
 async function clearFileRecords() {
+  if (isRecordStorageDisabled()) {
+    return false;
+  }
   try {
     const response = await fetch(RECORDS_API_URL, {
       method: "DELETE",
@@ -2343,6 +2361,9 @@ function sortRecords(records) {
 }
 
 function loadFallbackRecords() {
+  if (isRecordStorageDisabled()) {
+    return [];
+  }
   try {
     return JSON.parse(localStorage.getItem("mighty32-lite-records") || "[]");
   } catch {
@@ -2351,6 +2372,11 @@ function loadFallbackRecords() {
 }
 
 async function clearRecords() {
+  if (isRecordStorageDisabled()) {
+    state.records = [];
+    render();
+    return;
+  }
   await clearFileRecords();
   if (db) {
     await new Promise((resolve) => {
@@ -2363,6 +2389,10 @@ async function clearRecords() {
   localStorage.removeItem("mighty32-lite-records");
   state.records = [];
   render();
+}
+
+function isRecordStorageDisabled() {
+  return IS_GITHUB_PAGES;
 }
 
 function formatCard(card) {
@@ -2771,6 +2801,11 @@ function renderCharacterEditor() {
 }
 
 function renderRecords() {
+  if (isRecordStorageDisabled()) {
+    return `
+      <div class="notice compact">GitHub Pages에서는 전적 저장을 끕니다. 로컬 서버로 실행하면 data/games.jsonl에 저장됩니다.</div>
+    `;
+  }
   if (!state.records.length) {
     return `
       <div class="notice compact">아직 저장된 전적이 없습니다. 서버 실행 시 data/games.jsonl에, 아니면 브라우저 저장소에 기록됩니다.</div>
