@@ -43,7 +43,10 @@ const DB_VERSION = 1;
 const STORE_NAME = "games";
 const RECORDS_API_URL = "/api/records";
 const RECORD_LIMIT = 30;
-const IS_GITHUB_PAGES = window.location.hostname.endsWith(".github.io");
+const STATIC_RECORDS_DISABLED_HOSTS = ["leejseo.com"];
+const IS_STATIC_PAGES_HOST =
+  window.location.hostname.endsWith(".github.io") ||
+  STATIC_RECORDS_DISABLED_HOSTS.includes(window.location.hostname);
 const HUMAN = 0;
 const MAX_TARGET = 20;
 const MIN_TARGET = 13;
@@ -2392,7 +2395,7 @@ async function clearRecords() {
 }
 
 function isRecordStorageDisabled() {
-  return IS_GITHUB_PAGES;
+  return IS_STATIC_PAGES_HOST;
 }
 
 function formatCard(card) {
@@ -2803,7 +2806,7 @@ function renderCharacterEditor() {
 function renderRecords() {
   if (isRecordStorageDisabled()) {
     return `
-      <div class="notice compact">GitHub Pages에서는 전적 저장을 끕니다. 로컬 서버로 실행하면 data/games.jsonl에 저장됩니다.</div>
+      <div class="notice compact">GitHub Pages 정적 호스팅에서는 전적 저장을 끕니다. 로컬 서버로 실행하면 data/games.jsonl에 저장됩니다.</div>
     `;
   }
   if (!state.records.length) {

@@ -35,10 +35,12 @@ PORT=5173 npm start
 This repository includes a GitHub Actions workflow that deploys the static app to GitHub Pages on every push to `main`.
 
 ```text
-https://leejseo.github.io/mighty32-js/
+https://leejseo.com/mighty32-js/
 ```
 
-On GitHub Pages, game records are not saved. The app disables the records API, IndexedDB, and localStorage record fallback when it runs on `*.github.io`.
+`https://leejseo.github.io/mighty32-js/` redirects to the same deployment.
+
+On GitHub Pages, game records are not saved. The app disables the records API, IndexedDB, and localStorage record fallback when it runs on `*.github.io` or the configured Pages custom domain.
 
 ## Data
 
