@@ -188,6 +188,27 @@ select {
   padding: 8px;
 }
 
+.panel-collapse {
+  display: block;
+}
+
+.panel-collapse > .panel-title {
+  cursor: pointer;
+  list-style: none;
+}
+
+.panel-collapse > .panel-title::-webkit-details-marker {
+  display: none;
+}
+
+.panel-collapse > .panel-title::before {
+  content: "+ ";
+}
+
+.panel-collapse[open] > .panel-title::before {
+  content: "- ";
+}
+
 .control-panel {
   display: grid;
   gap: 8px;

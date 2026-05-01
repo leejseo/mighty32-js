@@ -2441,8 +2441,10 @@ function render() {
           <div class="panel-body">${renderScorePanel()}</div>
           <div class="panel-title section-gap">플레이어</div>
           <div class="panel-body">${renderPlayers()}</div>
-          <div class="panel-title section-gap">캐릭터</div>
-          <div class="panel-body">${renderCharacterEditor()}</div>
+          <details class="panel-collapse section-gap">
+            <summary class="panel-title">캐릭터</summary>
+            <div class="panel-body">${renderCharacterEditor()}</div>
+          </details>
           <div class="panel-title section-gap">로그</div>
           <div class="panel-body">${renderLog()}</div>
         </aside>
