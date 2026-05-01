@@ -53,11 +53,11 @@ const MIN_NO_TRUMP_TARGET = 12;
 const CPU_DELAY = 4500;
 const TRICK_RESOLVE_DELAY = 950;
 const BASE_BID_PERSONALITIES = [
-  { aggression: 0, noTrumpBias: 0, discipline: 0.55, stretch: 0 },
-  { aggression: 0.04, noTrumpBias: -0.05, discipline: 0.52, stretch: 0.02 },
-  { aggression: -0.08, noTrumpBias: 0.03, discipline: 0.66, stretch: -0.06 },
-  { aggression: 0.01, noTrumpBias: 0.08, discipline: 0.57, stretch: 0.01 },
-  { aggression: -0.05, noTrumpBias: -0.03, discipline: 0.62, stretch: -0.08 },
+  { aggression: 0, noTrumpBias: 0, discipline: 0.62, stretch: 0 },
+  { aggression: -0.04, noTrumpBias: -0.05, discipline: 0.64, stretch: -0.04 },
+  { aggression: -0.12, noTrumpBias: 0.03, discipline: 0.74, stretch: -0.1 },
+  { aggression: -0.06, noTrumpBias: 0.08, discipline: 0.67, stretch: -0.05 },
+  { aggression: -0.1, noTrumpBias: -0.03, discipline: 0.7, stretch: -0.12 },
 ];
 
 const app = document.querySelector("#app");
@@ -239,10 +239,10 @@ function createRoundBidPersonalities() {
       return { ...base };
     }
     return {
-      aggression: clamp(base.aggression + randomBetween(-0.1, 0.1), -0.26, 0.24),
-      noTrumpBias: clamp(base.noTrumpBias + randomBetween(-0.1, 0.1), -0.24, 0.24),
-      discipline: clamp(base.discipline + randomBetween(-0.1, 0.12), 0.36, 0.86),
-      stretch: clamp(base.stretch + randomBetween(-0.08, 0.08), -0.2, 0.18),
+      aggression: clamp(base.aggression + randomBetween(-0.08, 0.06), -0.34, 0.12),
+      noTrumpBias: clamp(base.noTrumpBias + randomBetween(-0.08, 0.08), -0.2, 0.2),
+      discipline: clamp(base.discipline + randomBetween(-0.06, 0.12), 0.5, 0.9),
+      stretch: clamp(base.stretch + randomBetween(-0.08, 0.04), -0.28, 0.08),
     };
   });
 }
@@ -548,11 +548,11 @@ function chooseCpuBid(playerIndex) {
         failure,
         score:
           candidate.confidence * 1.15 +
-          reserve * 0.22 +
-          (failure.successChance - 0.5) * 0.85 +
-          suitPreference * 0.8 +
-          personality.aggression * 0.28 -
-          pressure * 0.06 -
+          reserve * 0.28 +
+          (failure.successChance - 0.5) * 1.05 +
+          suitPreference * 0.55 +
+          personality.aggression * 0.16 -
+          pressure * 0.12 -
           highBidRiskPenalty(target) -
           failure.penalty,
       };
@@ -566,24 +566,24 @@ function chooseCpuBid(playerIndex) {
   candidates.sort((a, b) => b.score - a.score || getBidPower(b) - getBidPower(a));
   const best = candidates[0];
   const minConfidence = clamp(
-    (state.currentBid ? 0.39 : 0.31) +
-      personality.discipline * 0.18 -
-      personality.aggression * 0.24 +
+    (state.currentBid ? 0.48 : 0.39) +
+      personality.discipline * 0.22 -
+      personality.aggression * 0.1 +
       highBidConfidenceTax(best.target),
-    0.18,
-    0.86,
+    0.32,
+    0.9,
   );
   const forcedStretch =
     (best.target === best.minTarget && best.raw < best.target + 0.12) ||
     (best.target >= 18 && best.raw < best.target + 0.75);
   const closeCallChance = clamp(
-    0.42 +
-      (best.confidence - minConfidence) * 1.8 +
-      personality.aggression * 0.55 -
-      personality.discipline * 0.22 -
-      highBidRiskPenalty(best.target) * 0.5,
-    0.04,
-    0.94,
+    0.25 +
+      (best.confidence - minConfidence) * 1.35 +
+      personality.aggression * 0.25 -
+      personality.discipline * 0.28 -
+      highBidRiskPenalty(best.target) * 0.75,
+    0.02,
+    0.72,
   );
   if (best.confidence < minConfidence && Math.random() > closeCallChance) {
     return null;
@@ -607,44 +607,64 @@ function chooseCpuBidTarget(candidate, personality) {
   }
 
   let lift = 0;
-  const openQuietly = !state.currentBid && personality.discipline > 0.5 && Math.random() < 0.72;
-  if (!openQuietly && Math.random() < 0.1 + candidate.confidence * 0.11 + personality.aggression * 0.14) {
+  const openQuietly = !state.currentBid && personality.discipline > 0.48 && Math.random() < 0.88;
+  if (!openQuietly && Math.random() < 0.045 + candidate.confidence * 0.06 + personality.aggression * 0.08) {
     lift += 1;
   }
-  if (headroom >= 2 && Math.random() < 0.035 + personality.aggression * 0.12 + personality.stretch * 0.16) {
+  if (
+    headroom >= 2 &&
+    candidate.confidence > 0.76 &&
+    Math.random() < 0.012 + personality.aggression * 0.06 + personality.stretch * 0.08
+  ) {
     lift += 1;
   }
   if (
     headroom >= 3 &&
-    candidate.confidence > 0.82 &&
+    candidate.confidence > 0.9 &&
     candidate.ceiling >= 18 &&
-    Math.random() < 0.015 + personality.aggression * 0.1 + personality.stretch * 0.1
+    Math.random() < 0.004 + personality.aggression * 0.04 + personality.stretch * 0.04
   ) {
     lift += 1;
   }
 
   let target = Math.min(candidate.ceiling, candidate.minTarget + Math.max(0, lift));
+  if (target >= 16 && !isHighBidShape(candidate)) {
+    target = 15;
+  }
   if (target >= 17 && candidate.trump !== "NT" && !candidate.shape?.hasTopTrump) {
     target = 16;
   }
-  if (target >= 18 && candidate.confidence < 0.9 && Math.random() < personality.discipline + 0.24) {
+  if (target >= 18 && candidate.confidence < 0.94 && Math.random() < personality.discipline + 0.32) {
     target = 17;
   }
   return Math.min(candidate.ceiling, Math.max(candidate.minTarget, target));
 }
 
+function isHighBidShape(candidate) {
+  if (candidate.trump === "NT") {
+    return candidate.quality >= 7.1 && candidate.expectedPoints >= 16.2;
+  }
+  const shape = candidate.shape || {};
+  return (
+    candidate.quality >= 6.4 &&
+    shape.hasTopTrump &&
+    shape.trumpLength >= 4 &&
+    (shape.hasBothTrumpAk || shape.hasMighty || shape.hasJoker)
+  );
+}
+
 function highBidRiskPenalty(target) {
-  if (target < 17) {
+  if (target < 16) {
     return 0;
   }
-  return (target - 16) * 0.32 + Math.max(0, target - 18) * 0.32;
+  return (target - 15) * 0.38 + Math.max(0, target - 17) * 0.42;
 }
 
 function highBidConfidenceTax(target) {
-  if (target < 17) {
+  if (target < 16) {
     return 0;
   }
-  return (target - 16) * 0.07 + Math.max(0, target - 18) * 0.1;
+  return (target - 15) * 0.09 + Math.max(0, target - 17) * 0.11;
 }
 
 function evaluateBidFailureRisk(candidate, target, personality) {
@@ -652,24 +672,24 @@ function evaluateBidFailureRisk(candidate, target, personality) {
   const quality = candidate.quality ?? 0;
   const qualityNeed = target >= 18
     ? (candidate.trump === "NT" ? 7.2 : 6.8) + (target - 18) * 1.05
-    : 4.15 + Math.max(0, target - getOpeningBidFloor(candidate.trump)) * 0.42;
+    : 4.45 + Math.max(0, target - getOpeningBidFloor(candidate.trump)) * 0.55;
   const pointMargin = expectedPoints - target;
   const qualityMargin = quality - qualityNeed;
   const successChance = clamp(
-    0.49 +
-      pointMargin * 0.17 +
-      qualityMargin * 0.075 +
-      candidate.confidence * 0.16 +
-      personality.aggression * 0.06 -
-      personality.discipline * 0.04,
+    0.45 +
+      pointMargin * 0.16 +
+      qualityMargin * 0.07 +
+      candidate.confidence * 0.12 +
+      personality.aggression * 0.035 -
+      personality.discipline * 0.06,
     0.05,
     0.95,
   );
   const missBy = Math.max(0, target - expectedPoints);
   const penalty =
     (1 - successChance) *
-      (0.85 + Math.max(0, target - 13) * 0.2 + Math.max(0, target - 17) * 0.55) +
-    missBy * (0.32 + personality.discipline * 0.22);
+      (1.05 + Math.max(0, target - 13) * 0.28 + Math.max(0, target - 16) * 0.62) +
+    missBy * (0.48 + personality.discipline * 0.28);
   return {
     successChance,
     expectedPoints,
@@ -680,24 +700,27 @@ function evaluateBidFailureRisk(candidate, target, personality) {
 
 function minimumBidSuccessChance(target, personality) {
   return clamp(
-    0.4 + Math.max(0, target - 14) * 0.075 + Math.max(0, target - 17) * 0.1 + personality.discipline * 0.1,
-    0.36,
-    0.82,
+    0.45 + Math.max(0, target - 14) * 0.095 + Math.max(0, target - 16) * 0.12 + personality.discipline * 0.11,
+    0.42,
+    0.9,
   );
 }
 
 function shouldPassForFailureRisk(candidate, personality) {
-  const required = minimumBidSuccessChance(candidate.target, personality) + (state.currentBid ? 0.04 : 0);
+  const required = minimumBidSuccessChance(candidate.target, personality) + (state.currentBid ? 0.07 : 0);
+  if (candidate.target >= 16 && !isHighBidShape(candidate)) {
+    return true;
+  }
   if (candidate.target >= 17 && candidate.trump !== "NT" && !candidate.shape?.hasTopTrump) {
     return true;
   }
   if (candidate.failure.successChance < required) {
     return true;
   }
-  if (candidate.failure.missBy > 1.2 && candidate.target >= 16) {
-    return Math.random() < personality.discipline + 0.18;
+  if (candidate.failure.missBy > 0.55 && candidate.target >= 16) {
+    return Math.random() < personality.discipline + 0.28;
   }
-  if (candidate.target >= 18 && candidate.failure.successChance < required + 0.08) {
+  if (candidate.target >= 17 && candidate.failure.successChance < required + 0.08) {
     return Math.random() < personality.discipline;
   }
   return false;
@@ -770,7 +793,7 @@ function evaluateBid(hand, playerIndex = HUMAN) {
       return sum;
     }, 0);
     const pointCards = suited.filter(isPointCard).length;
-    const score = suited.length * 0.62 + highCardScore + pointCards * 0.28;
+    const score = suited.length * 0.55 + highCardScore + pointCards * 0.22;
     const trumpLength = suited.length;
     const hasTopTrump = suited.some((card) => card.rank === 14 || card.rank === 13);
     const controls = hand.reduce((sum, card) => {
@@ -788,16 +811,16 @@ function evaluateBid(hand, playerIndex = HUMAN) {
       }
       return sum;
     }, 0);
-    const longTrumpShape = trumpLength >= 4 ? (trumpLength - 3) * 0.45 : 0;
-    const fragileSuitPenalty = (hasTopTrump ? 0 : 1.25) + (trumpLength <= 3 ? 0.35 : 0);
+    const longTrumpShape = trumpLength >= 4 ? (trumpLength - 3) * 0.32 : 0;
+    const fragileSuitPenalty = (hasTopTrump ? 0 : 1.45) + (trumpLength <= 3 ? 0.55 : 0);
     const raw =
-      11.35 +
-      points * 0.34 +
-      aces * 0.24 +
-      trumpLength * 0.33 +
-      score * 0.38 +
-      controls * 0.69 +
-      voids * 0.18 +
+      10.72 +
+      points * 0.28 +
+      aces * 0.18 +
+      trumpLength * 0.26 +
+      score * 0.32 +
+      controls * 0.56 +
+      voids * 0.12 +
       longTrumpShape -
       fragileSuitPenalty;
     candidates.push(makeBidCandidate(suit, raw, hand, personality));
@@ -820,7 +843,7 @@ function evaluateBid(hand, playerIndex = HUMAN) {
     }
     return sum;
   }, 0);
-  const noTrumpRaw = 10.9 + points * 0.43 + aces * 0.36 + noTrumpControls * 0.72 + (balanced ? 0.9 : -1.1);
+  const noTrumpRaw = 10.36 + points * 0.36 + aces * 0.28 + noTrumpControls * 0.58 + (balanced ? 0.55 : -1.2);
   candidates.push(makeBidCandidate("NT", noTrumpRaw, hand, personality));
   candidates.sort(
     (a, b) =>
@@ -841,10 +864,10 @@ function evaluateBid(hand, playerIndex = HUMAN) {
 function makeBidCandidate(trump, raw, hand, personality) {
   const floor = getOpeningBidFloor(trump);
   const styleAdjustment =
-    personality.aggression * 0.58 +
-    personality.stretch * 0.34 +
-    (trump === "NT" ? personality.noTrumpBias * 1.05 : 0) -
-    personality.discipline * 0.22;
+    personality.aggression * 0.38 +
+    personality.stretch * 0.22 +
+    (trump === "NT" ? personality.noTrumpBias * 0.75 : 0) -
+    personality.discipline * 0.32;
   const adjustedRaw = raw + styleAdjustment;
   const quality = highBidQuality(hand, trump);
   const bidShape = getBidShape(hand, trump);
@@ -862,7 +885,7 @@ function makeBidCandidate(trump, raw, hand, personality) {
     trump,
     raw: adjustedRaw,
     ceiling,
-    confidence: clamp((adjustedRaw - floor + 1.1) / 5.4, 0, 1),
+    confidence: clamp((adjustedRaw - floor + 0.7) / 6.2, 0, 1),
     expectedPoints,
     quality,
     shape: bidShape,
@@ -894,8 +917,22 @@ function capFragileSuitBid(ceiling, trump, shape) {
   if (!shape.hasTopTrump && capped >= 17) {
     capped = 16;
   }
+  if (!shape.hasTopTrump && capped >= 16) {
+    capped = 15;
+  }
   if (shape.trumpLength <= 3 && capped >= 17) {
     capped = 16;
+  }
+  if (shape.trumpLength <= 3 && capped >= 16 && !shape.hasBothTrumpAk) {
+    capped = 15;
+  }
+  if (capped >= 16) {
+    const hasSixteenCore =
+      shape.hasBothTrumpAk ||
+      (shape.hasTopTrump && shape.trumpLength >= 4 && (shape.hasMighty || shape.hasJoker));
+    if (!hasSixteenCore) {
+      capped = 15;
+    }
   }
   if (capped >= 17) {
     const hasSeventeenCore =
@@ -940,8 +977,8 @@ function capBidByFailureRisk(ceiling, floor, expectedPoints, quality, personalit
       quality,
     };
     const failure = evaluateBidFailureRisk(candidate, capped, personality);
-    const relaxedRequirement = minimumBidSuccessChance(capped, personality) - 0.08;
-    if (failure.successChance >= relaxedRequirement && failure.missBy <= 1.55) {
+    const relaxedRequirement = minimumBidSuccessChance(capped, personality) - 0.02;
+    if (failure.successChance >= relaxedRequirement && failure.missBy <= 0.85) {
       break;
     }
     capped -= 1;
@@ -968,7 +1005,7 @@ function estimateBidExpectedPoints(hand, trump, raw, quality) {
     joker +
     lengthBonus +
     Math.max(-0.5, (quality - 5.2) * 0.16);
-  return clamp(rawAnchor + conservativeShape - 0.45 - fragility, 10.5, 19.2);
+  return clamp(rawAnchor + conservativeShape - 0.75 - fragility, 10.2, 18.5);
 }
 
 function highBidQuality(hand, trump) {
