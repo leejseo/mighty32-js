@@ -1426,11 +1426,11 @@ function handleCardClick(cardId) {
 }
 
 function needsJokerLeadSuitChoice(card) {
-  return state.phase === "playing" && state.currentPlayer === HUMAN && state.trick.length === 0 && card.joker && !state.jokerLeadSuit;
+  return state.phase === "playing" && state.currentPlayer === HUMAN && state.trick.length === 0 && card.joker && isJokerEffective() && !state.jokerLeadSuit;
 }
 
 function needsJokerCallChoice(card) {
-  return state.phase === "playing" && state.currentPlayer === HUMAN && state.trick.length === 0 && isJokerCall(card);
+  return state.phase === "playing" && state.currentPlayer === HUMAN && state.trick.length === 0 && isJokerCall(card) && canUseJokerCallAsLead(HUMAN, card);
 }
 
 function chooseHumanJokerLeadSuit(suit) {
@@ -1472,8 +1472,8 @@ function chooseHumanJokerCallMode(useCall) {
     render();
     return;
   }
-  if (useCall && !canUseJokerCallAsLead(HUMAN, card)) {
-    state.message = "첫 트릭에는 일반 카드가 있으면 조커콜로 부를 수 없습니다.";
+  if (useCall && (!canUseJokerCallAsLead(HUMAN, card) || !isJokerEffective())) {
+    state.message = "첫 트릭과 마지막 트릭에는 조커콜 효력이 없습니다.";
     render();
     return;
   }
@@ -1493,7 +1493,7 @@ function cancelJokerCallChoice() {
 
 function getIllegalPlayMessage(playerIndex, card) {
   if (state.trick.length === 0 && state.trickNumber === 1 && isRestrictedFirstLeadCard(card)) {
-    return "첫 트릭 리드는 일반 카드가 있으면 기루, 마이티, 조커, 조커콜을 낼 수 없습니다.";
+    return "첫 트릭 리드는 일반 카드가 있으면 기루를 낼 수 없습니다.";
   }
   if (isJokerCallLead() && playerHasJoker(playerIndex)) {
     return "조커콜이 나왔습니다. 조커를 내야 하며, 마이티로 대신 받을 수 있습니다.";
@@ -2153,7 +2153,7 @@ function evaluateFriendLeadDiscipline(playerIndex, card, legalCards) {
 }
 
 function simulateTrickAfterPlay(playerIndex, card) {
-  const jokerLeadSuit = state.trick.length === 0 && card.joker
+  const jokerLeadSuit = state.trick.length === 0 && card.joker && isJokerEffective()
     ? chooseJokerLeadSuitForSim(playerIndex)
     : state.jokerLeadSuit;
   const jokerCallActive = state.trick.length === 0 && isJokerCall(card)
@@ -2183,7 +2183,7 @@ function simulateTrickAfterPlay(playerIndex, card) {
 }
 
 function evaluateCurrentTrickTree(playerIndex, card, perspectiveSide) {
-  const jokerLeadSuit = state.trick.length === 0 && card.joker
+  const jokerLeadSuit = state.trick.length === 0 && card.joker && isJokerEffective()
     ? chooseJokerLeadSuitForSim(playerIndex)
     : state.jokerLeadSuit;
   const jokerCallActive = state.trick.length === 0 && isJokerCall(card)
@@ -2679,7 +2679,7 @@ function playCard(playerIndex, cardId) {
   }
   let declaredJokerCall = false;
   if (state.phase === "playing" && state.trick.length === 0) {
-    if (card.joker && !state.jokerLeadSuit) {
+    if (card.joker && isJokerEffective() && !state.jokerLeadSuit) {
       setJokerLeadSuit(playerIndex, chooseJokerLeadSuit(playerIndex));
     }
     if (isJokerCall(card)) {
@@ -2934,7 +2934,7 @@ function isOrdinaryTrump(card) {
 }
 
 function isRestrictedFirstLeadCard(card) {
-  return card.joker || isMighty(card, state.trump) || isOrdinaryTrump(card);
+  return isOrdinaryTrump(card);
 }
 
 function hasUnrestrictedFirstLeadCard(playerIndex) {
@@ -2967,6 +2967,9 @@ function isJokerCall(card) {
 
 function canUseJokerCallAsLead(playerIndex, card) {
   if (!isJokerCall(card)) {
+    return false;
+  }
+  if (!isJokerEffective()) {
     return false;
   }
   if (state.trickNumber !== 1 || playerIndex !== state.declarerIndex) {
