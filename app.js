@@ -54,6 +54,58 @@ const MIN_NO_TRUMP_TARGET = 12;
 const CPU_DELAY = 4500;
 const TRICK_RESOLVE_DELAY = 950;
 const TRICK_TREE_WEIGHT = 0.42;
+const AI_MODEL_URL = "assets/models/mighty-policy-v1.bin";
+const AI_MODEL_MAGIC = "M32P";
+const AI_MLP_MODEL_URL = "assets/models/mighty-mlp-policy-v2.bin";
+const AI_MLP_MODEL_MAGIC = "M32M";
+const AI_BID_FEATURES = [
+  "bias",
+  "targetNorm",
+  "ceilingReserve",
+  "expectedMargin",
+  "confidence",
+  "qualityNorm",
+  "isNoTrump",
+  "trumpLengthNorm",
+  "hasMighty",
+  "hasJoker",
+  "hasTopTrump",
+  "pointCountNorm",
+  "targetPressure",
+  "bidPressure",
+  "hasFirstLead",
+  "voidCountNorm",
+];
+const AI_PLAY_FEATURES = [
+  "bias",
+  "isDeclarerSide",
+  "isLead",
+  "trickProgress",
+  "cardIsPoint",
+  "trickPointsBefore",
+  "outcomePoints",
+  "playerSideWins",
+  "declarerNeedNorm",
+  "defensePointsNorm",
+  "cardIsMighty",
+  "cardIsJoker",
+  "cardIsTrump",
+  "rankNorm",
+  "cardIsControl",
+  "legalCountNorm",
+  "isFinalSeat",
+  "currentWinnerAlly",
+  "currentWinnerEnemy",
+  "spendCostNorm",
+  "cardIsJokerCall",
+  "effectiveJokerLead",
+  "winsCurrentTrick",
+  "targetNorm",
+  "handPointNorm",
+  "suitLengthNorm",
+  "knownDeclarerVoidSuit",
+  "knownOpponentVoidSuit",
+];
 const BASE_BID_PERSONALITIES = [
   { aggression: 0, noTrumpBias: 0, discipline: 0.62, stretch: 0 },
   { aggression: -0.04, noTrumpBias: -0.05, discipline: 0.64, stretch: -0.04 },
@@ -67,6 +119,8 @@ let playerProfiles = loadCharacterProfiles();
 let PLAYER_NAMES = playerProfiles.map((profile) => profile.name);
 let db = null;
 let cpuTimer = null;
+let aiPolicyModel = createDefaultAiPolicyModel();
+let aiMlpPolicyModel = createDefaultAiMlpPolicyModel();
 let state = createEmptyState();
 
 function createEmptyState() {
@@ -106,7 +160,261 @@ function createEmptyState() {
   };
 }
 
+function createDefaultAiPolicyModel() {
+  return {
+    name: "rulebase",
+    version: 0,
+    source: "default",
+    enabled: false,
+    bidScale: 1,
+    playScale: 1,
+    bidWeights: Array(AI_BID_FEATURES.length).fill(0),
+    playWeights: Array(AI_PLAY_FEATURES.length).fill(0),
+  };
+}
+
+function createDefaultAiMlpPolicyModel() {
+  return {
+    name: "mlp-disabled",
+    version: 0,
+    source: "default",
+    enabled: false,
+    bid: null,
+    play: null,
+  };
+}
+
+async function loadAiPolicyModel() {
+  const scriptModel = normalizeAiPolicyModel(window.MIGHTY32_AI_MODEL, "script");
+  const binaryModel = await loadBinaryAiPolicyModel();
+  return binaryModel || scriptModel || createDefaultAiPolicyModel();
+}
+
+async function loadAiMlpPolicyModel() {
+  const scriptModel = normalizeAiMlpPolicyModel(window.MIGHTY32_MLP_MODEL, "script");
+  const binaryModel = await loadBinaryAiMlpPolicyModel(scriptModel);
+  return binaryModel || scriptModel || createDefaultAiMlpPolicyModel();
+}
+
+async function loadBinaryAiPolicyModel() {
+  try {
+    const response = await fetch(`${AI_MODEL_URL}?v=20260508`, { cache: "no-store" });
+    if (!response.ok) {
+      return null;
+    }
+    return parseBinaryAiPolicyModel(await response.arrayBuffer());
+  } catch {
+    return null;
+  }
+}
+
+function parseBinaryAiPolicyModel(buffer) {
+  if (!buffer || buffer.byteLength < 12) {
+    return null;
+  }
+  const view = new DataView(buffer);
+  const magic = String.fromCharCode(view.getUint8(0), view.getUint8(1), view.getUint8(2), view.getUint8(3));
+  if (magic !== AI_MODEL_MAGIC) {
+    return null;
+  }
+  const version = view.getUint16(4, true);
+  const bidLength = view.getUint16(6, true);
+  const playLength = view.getUint16(8, true);
+  if (bidLength !== AI_BID_FEATURES.length || playLength !== AI_PLAY_FEATURES.length) {
+    return null;
+  }
+  const expectedBytes = 12 + (bidLength + playLength) * 4;
+  if (buffer.byteLength < expectedBytes) {
+    return null;
+  }
+  let offset = 12;
+  const bidWeights = [];
+  const playWeights = [];
+  for (let i = 0; i < bidLength; i += 1) {
+    bidWeights.push(view.getFloat32(offset, true));
+    offset += 4;
+  }
+  for (let i = 0; i < playLength; i += 1) {
+    playWeights.push(view.getFloat32(offset, true));
+    offset += 4;
+  }
+  return normalizeAiPolicyModel(
+    {
+      name: "mighty-policy-v1",
+      version,
+      source: "binary",
+      bidWeights,
+      playWeights,
+      bidScale: 0.85,
+      playScale: 0.18,
+    },
+    "binary",
+  );
+}
+
+function normalizeAiPolicyModel(model, source = "inline") {
+  if (!model || typeof model !== "object") {
+    return null;
+  }
+  const bidWeights = normalizeWeightArray(model.bidWeights, AI_BID_FEATURES.length);
+  const playWeights = normalizeWeightArray(model.playWeights, AI_PLAY_FEATURES.length);
+  if (!bidWeights || !playWeights) {
+    return null;
+  }
+  return {
+    name: String(model.name || "mighty-policy-v1"),
+    version: Number(model.version || 1),
+    source: String(model.source || source),
+    enabled: model.enabled !== false,
+    bidScale: Number.isFinite(model.bidScale) ? Number(model.bidScale) : 0.85,
+    playScale: Number.isFinite(model.playScale) ? Number(model.playScale) : 0.18,
+    bidWeights,
+    playWeights,
+  };
+}
+
+function normalizeWeightArray(values, length) {
+  if (!Array.isArray(values) || values.length !== length) {
+    return null;
+  }
+  return values.map((value) => Number(value) || 0);
+}
+
+async function loadBinaryAiMlpPolicyModel(scriptModel = null) {
+  try {
+    const response = await fetch(`${AI_MLP_MODEL_URL}?v=20260508`, { cache: "no-store" });
+    if (!response.ok) {
+      return null;
+    }
+    return parseBinaryAiMlpPolicyModel(await response.arrayBuffer(), scriptModel);
+  } catch {
+    return null;
+  }
+}
+
+function parseBinaryAiMlpPolicyModel(buffer, scriptModel = null) {
+  if (!buffer || buffer.byteLength < 16) {
+    return null;
+  }
+  const view = new DataView(buffer);
+  const magic = String.fromCharCode(view.getUint8(0), view.getUint8(1), view.getUint8(2), view.getUint8(3));
+  if (magic !== AI_MLP_MODEL_MAGIC) {
+    return null;
+  }
+  const version = view.getUint16(4, true);
+  const bidInput = view.getUint16(6, true);
+  const bidHidden = view.getUint16(8, true);
+  const playInput = view.getUint16(10, true);
+  const playHidden = view.getUint16(12, true);
+  if (bidInput !== AI_BID_FEATURES.length || playInput !== AI_PLAY_FEATURES.length || bidHidden <= 0 || playHidden <= 0) {
+    return null;
+  }
+  let offset = 16;
+  const bid = readMlpHead(view, buffer.byteLength, offset, bidInput, bidHidden, scriptModel?.bid?.outputScale ?? 0.45);
+  if (!bid) {
+    return null;
+  }
+  offset = bid.nextOffset;
+  const play = readMlpHead(view, buffer.byteLength, offset, playInput, playHidden, scriptModel?.play?.outputScale ?? 0.28);
+  if (!play) {
+    return null;
+  }
+  return normalizeAiMlpPolicyModel(
+    {
+      name: "mighty-mlp-policy-v2",
+      version,
+      source: "binary",
+      enabled: true,
+      bid: bid.head,
+      play: play.head,
+    },
+    "binary",
+  );
+}
+
+function readMlpHead(view, byteLength, startOffset, input, hidden, outputScale) {
+  const valueCount = input * hidden + hidden + hidden + 1;
+  if (startOffset + valueCount * 4 > byteLength) {
+    return null;
+  }
+  let offset = startOffset;
+  const w1 = [];
+  const b1 = [];
+  const w2 = [];
+  for (let i = 0; i < input * hidden; i += 1) {
+    w1.push(view.getFloat32(offset, true));
+    offset += 4;
+  }
+  for (let i = 0; i < hidden; i += 1) {
+    b1.push(view.getFloat32(offset, true));
+    offset += 4;
+  }
+  for (let i = 0; i < hidden; i += 1) {
+    w2.push(view.getFloat32(offset, true));
+    offset += 4;
+  }
+  const b2 = view.getFloat32(offset, true);
+  offset += 4;
+  return {
+    head: {
+      input,
+      hidden,
+      outputScale,
+      w1,
+      b1,
+      w2,
+      b2,
+    },
+    nextOffset: offset,
+  };
+}
+
+function normalizeAiMlpPolicyModel(model, source = "inline") {
+  if (!model || typeof model !== "object") {
+    return null;
+  }
+  const bid = normalizeMlpHead(model.bid, AI_BID_FEATURES.length);
+  const play = normalizeMlpHead(model.play, AI_PLAY_FEATURES.length);
+  if (!bid || !play) {
+    return null;
+  }
+  return {
+    name: String(model.name || "mighty-mlp-policy-v2"),
+    version: Number(model.version || 1),
+    source: String(model.source || source),
+    enabled: model.enabled !== false,
+    bid,
+    play,
+  };
+}
+
+function normalizeMlpHead(head, expectedInput) {
+  if (!head || typeof head !== "object") {
+    return null;
+  }
+  const input = Number(head.input || expectedInput);
+  const hidden = Number(head.hidden || head.b1?.length || 0);
+  const w1 = normalizeWeightArray(head.w1, input * hidden);
+  const b1 = normalizeWeightArray(head.b1, hidden);
+  const w2 = normalizeWeightArray(head.w2, hidden);
+  const b2 = Number(head.b2 || 0);
+  if (input !== expectedInput || hidden <= 0 || !w1 || !b1 || !w2) {
+    return null;
+  }
+  return {
+    input,
+    hidden,
+    outputScale: Number.isFinite(head.outputScale) ? Number(head.outputScale) : 0.3,
+    w1,
+    b1,
+    w2,
+    b2,
+  };
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
+  aiPolicyModel = await loadAiPolicyModel();
+  aiMlpPolicyModel = await loadAiMlpPolicyModel();
   db = await openRecordsDb();
   state.records = await loadRecords();
   startNewRound();
@@ -599,10 +907,17 @@ function chooseCpuBid(playerIndex) {
       const reserve = candidate.ceiling - target;
       const suitPreference = candidate.trump === "NT" ? personality.noTrumpBias : 0;
       const failure = evaluateBidFailureRisk(candidate, target, personality);
-      return {
+      const enriched = {
         ...candidate,
         target,
         failure,
+        pressure,
+        reserve,
+      };
+      const policyScore = evaluateAiPolicyBid(enriched, playerIndex);
+      return {
+        ...enriched,
+        policyScore,
         score:
           candidate.confidence * 1.15 +
           reserve * 0.28 +
@@ -611,7 +926,8 @@ function chooseCpuBid(playerIndex) {
           personality.aggression * 0.16 -
           pressure * 0.12 -
           highBidRiskPenalty(target) -
-          failure.penalty,
+          failure.penalty +
+          policyScore,
       };
     })
     .filter((candidate) => !state.currentBid || bidBeats(candidate, state.currentBid));
@@ -797,6 +1113,155 @@ function getBidPersonality(playerIndex) {
     };
   }
   return profile;
+}
+
+function evaluateAiPolicyBid(candidate, playerIndex) {
+  if (!aiPolicyModel.enabled && !aiMlpPolicyModel.enabled) {
+    return 0;
+  }
+  const features = buildAiBidFeatures(candidate, playerIndex);
+  const linearScore = aiPolicyModel.enabled
+    ? dotWeights(aiPolicyModel.bidWeights, features) * aiPolicyModel.bidScale
+    : 0;
+  const mlpScore = aiMlpPolicyModel.enabled
+    ? evaluateMlpHead(aiMlpPolicyModel.bid, features)
+    : 0;
+  return clamp(linearScore + mlpScore, -3.4, 3.4);
+}
+
+function buildAiBidFeatures(candidate, playerIndex) {
+  const hand = state.hands[playerIndex] || [];
+  const shape = candidate.shape || getBidShape(hand, candidate.trump);
+  const pointCount = hand.filter(isPointCard).length;
+  const voidCount = SUITS.filter((suit) => !hand.some((card) => !card.joker && card.suit === suit)).length;
+  const firstLeadCards = hand.filter((card) => isFirstLeadCandidate(card, candidate.trump));
+  const target = candidate.target ?? candidate.ceiling ?? getOpeningBidFloor(candidate.trump);
+  const minTarget = candidate.minTarget ?? getMinimumBid(candidate.trump);
+  const bidPressure = state.currentBid
+    ? getBidPower({ trump: candidate.trump, target }) - getBidPower(state.currentBid)
+    : target - getOpeningBidFloor(candidate.trump);
+  return [
+    1,
+    target / MAX_TARGET,
+    clamp((candidate.ceiling - target) / 5, -1, 1),
+    clamp(((candidate.expectedPoints ?? target) - target) / 5, -1.5, 1.5),
+    candidate.confidence ?? 0,
+    clamp((candidate.quality ?? 0) / 10, 0, 1.5),
+    candidate.trump === "NT" ? 1 : 0,
+    clamp((shape.trumpLength || 0) / 8, 0, 1),
+    shape.hasMighty ? 1 : 0,
+    shape.hasJoker ? 1 : 0,
+    shape.hasTopTrump ? 1 : 0,
+    pointCount / 10,
+    clamp((target - minTarget) / 7, 0, 1),
+    clamp(bidPressure / 6, -1, 1),
+    firstLeadCards.length ? 1 : 0,
+    voidCount / 4,
+  ];
+}
+
+function isFirstLeadCandidate(card, trump = state.trump) {
+  if (card.joker) {
+    return false;
+  }
+  if (trump !== "NT" && card.suit === trump && !isMighty(card, trump)) {
+    return false;
+  }
+  return card.rank >= 13 || isMighty(card, trump);
+}
+
+function evaluateAiPolicyPlay(playerIndex, card, legalCards, outcome) {
+  if (!aiPolicyModel.enabled && !aiMlpPolicyModel.enabled) {
+    return 0;
+  }
+  const features = buildAiPlayFeatures(playerIndex, card, legalCards, outcome);
+  const linearScore = aiPolicyModel.enabled
+    ? dotWeights(aiPolicyModel.playWeights, features) * aiPolicyModel.playScale
+    : 0;
+  const mlpScore = aiMlpPolicyModel.enabled
+    ? evaluateMlpHead(aiMlpPolicyModel.play, features)
+    : 0;
+  return clamp(linearScore + mlpScore, -22, 22);
+}
+
+function buildAiPlayFeatures(playerIndex, card, legalCards, outcome) {
+  const playerSide = getSideForAi(playerIndex);
+  const winnerSide = getSideForAi(outcome.winner);
+  const currentWinner = state.trick.length ? getTrickWinner([...state.trick]) : null;
+  const currentWinnerSide = currentWinner === null ? null : getSideForAi(currentWinner);
+  const leadSuit = getLeadSuit();
+  const hand = state.hands[playerIndex] || [];
+  const suitCounts = getSuitCounts(hand);
+  const handPointCount = hand.filter(isPointCard).length;
+  const trickPointsBefore = state.trick.filter((entry) => isPointCard(entry.card)).length;
+  const declarerPoints = getDeclarerTeamPointsForAi(playerIndex);
+  const declarerNeed = Math.max(0, state.target - declarerPoints);
+  const knownVoids = getKnownVoidSuitsByPlayer();
+  const knownDeclarerVoidSuit =
+    leadSuit && state.declarerIndex !== null && knownVoids[state.declarerIndex]?.has(leadSuit) ? 1 : 0;
+  let knownOpponentVoidSuit = 0;
+  if (leadSuit) {
+    for (let index = 0; index < PLAYER_NAMES.length; index += 1) {
+      if (index !== playerIndex && getSideForAi(index) !== playerSide && knownVoids[index]?.has(leadSuit)) {
+        knownOpponentVoidSuit = 1;
+        break;
+      }
+    }
+  }
+  return [
+    1,
+    playerSide === "declarer" ? 1 : 0,
+    state.trick.length === 0 ? 1 : 0,
+    state.trickNumber / 10,
+    isPointCard(card) ? 1 : 0,
+    trickPointsBefore / 5,
+    outcome.points / 5,
+    playerSide === winnerSide ? 1 : 0,
+    clamp(declarerNeed / MAX_TARGET, 0, 1),
+    clamp(getDefenseTeamPointsForAi() / TOTAL_POINT_CARDS, 0, 1),
+    isMighty(card, state.trump) ? 1 : 0,
+    card.joker ? 1 : 0,
+    isOrdinaryTrump(card) ? 1 : 0,
+    card.joker ? 0 : card.rank / 14,
+    isControlCard(card) ? 1 : 0,
+    legalCards.length / 10,
+    state.trick.length === 4 ? 1 : 0,
+    currentWinnerSide === playerSide ? 1 : 0,
+    currentWinnerSide && currentWinnerSide !== playerSide ? 1 : 0,
+    aiCardSpendCost(card) / 120,
+    isJokerCall(card) ? 1 : 0,
+    card.joker && state.trick.length === 0 && isJokerEffective() ? 1 : 0,
+    state.trick.length === 0 ? 0 : wouldWinCurrentTrick(playerIndex, card) ? 1 : 0,
+    state.target / MAX_TARGET,
+    handPointCount / 10,
+    card.joker ? 0 : (suitCounts[card.suit] || 0) / 10,
+    knownDeclarerVoidSuit,
+    knownOpponentVoidSuit,
+  ];
+}
+
+function dotWeights(weights, features) {
+  let sum = 0;
+  for (let i = 0; i < weights.length && i < features.length; i += 1) {
+    sum += weights[i] * features[i];
+  }
+  return sum;
+}
+
+function evaluateMlpHead(head, features) {
+  if (!head) {
+    return 0;
+  }
+  let output = head.b2;
+  for (let hiddenIndex = 0; hiddenIndex < head.hidden; hiddenIndex += 1) {
+    let activation = head.b1[hiddenIndex];
+    const rowOffset = hiddenIndex * head.input;
+    for (let featureIndex = 0; featureIndex < head.input; featureIndex += 1) {
+      activation += head.w1[rowOffset + featureIndex] * (features[featureIndex] || 0);
+    }
+    output += head.w2[hiddenIndex] * Math.tanh(activation);
+  }
+  return output * head.outputScale;
 }
 
 function finishBidding() {
@@ -1812,6 +2277,7 @@ function evaluateCpuCardChoice(playerIndex, card, legalCards) {
   }
 
   score += treeScore * TRICK_TREE_WEIGHT;
+  score += evaluateAiPolicyPlay(playerIndex, card, legalCards, outcome);
 
   if (card.joker && !isJokerEffective()) {
     score -= legalCards.some((item) => !item.joker) ? 80 : 0;
@@ -3000,9 +3466,6 @@ function shouldUseJokerCall(playerIndex, card) {
 function getJokerCallSuit() {
   if (state.trump === "C") {
     return "S";
-  }
-  if (state.trump === "H") {
-    return "D";
   }
   return "C";
 }

@@ -16,6 +16,8 @@
 - 노기루 입찰, 조커 문양 지정, 조커콜 선언/일반 리드 선택
 - 첫 트릭 기루 제한, 마이티 리드 시 스페이드 팔로우, 조커 첫/마지막 트릭 최약 처리
 - 현재 트릭 알파베타 탐색과 공개 카드 카운팅을 섞은 CPU 카드 선택
+- 정적 소형 정책 모델(`assets/models/mighty-policy-v1.js`, `.bin`)을 입찰/플레이 점수 보정에 사용
+- `tools/train-ai.js`로 학습 AI 1명과 룰베이스 AI 4명의 입찰부터 플레이까지 반복 대국 및 모델 갱신
 - CPU 캐릭터 이름/이미지 커스터마이즈
 - 게임 기록을 `data/games.jsonl`에 JSON Lines 형식으로 저장
 
@@ -36,6 +38,28 @@ http://127.0.0.1:4173/
 ```bash
 PORT=5173 npm start
 ```
+
+## AI Training
+
+현재 앱은 기존 룰베이스 평가에 선형 정책 모델과 작은 MLP 정책 모델을 더합니다. 모델은 GitHub Pages에서도 그대로 받을 수 있는 정적 JS/바이너리 파일입니다.
+
+```bash
+npm run ai:eval
+npm run ai:train -- --iterations=12 --candidates=10 --games=1200 --repeats=6 --seed=20260513
+npm run ai:pipeline -- --iterations=10 --candidates=8 --train-games=1400 --eval-games=4000 --repeats=6
+npm run ai:pipeline -- --mlp --fresh --epochs=8 --train-games=2200 --eval-games=3000 --inner-eval-games=1000 --repeats=5
+```
+
+검증 예시:
+
+```text
+node tools/train-ai.js --eval --games=10000 --seed=20261101
+eval: score=0.0305 win=50.0% bid=20.4% dec=45.6% def=52.9% games=10000
+```
+
+관련 연구 노트는 `docs/ai-research.md`에 정리했습니다.
+
+`tools/`의 학습 스크립트와 `assets/models/*.js`, `assets/models/*.bin`은 커밋 대상입니다. `data/training-runs/`에는 파이프라인 실행 로그와 후보 검증 결과가 저장되며 중간 데이터라서 Git에서는 제외합니다.
 
 ## GitHub Pages
 
@@ -61,10 +85,13 @@ On GitHub Pages, game records are not saved. The Pages workflow writes `pages-co
 .
 ├── app.js
 ├── assets/avatars/
+├── assets/models/
 ├── data/
+├── docs/
 ├── index.html
 ├── server.js
 ├── styles.css
+├── tools/train-ai.js
 └── PRD.md
 ```
 

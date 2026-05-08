@@ -4,6 +4,10 @@
   "description": "A lightweight Mighty32-inspired browser card game.",
   "license": "MIT",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "ai:eval": "node tools/train-ai.js --eval --games=10000",
+    "ai:train": "node tools/train-ai.js --train",
+    "ai:pipeline": "node tools/ai-pipeline.js",
+    "ai:train-mlp": "node tools/train-mlp-ai.js"
   }
 }
