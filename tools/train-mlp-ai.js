@@ -13,6 +13,7 @@ function main() {
   const trainPasses = Number(options.trainPasses || 3);
   const bidHidden = Number(options.bidHidden || 32);
   const playHidden = Number(options.playHidden || 64);
+  const opponentModels = engine.loadOpponentModels(options.opponentMlpPaths);
 
   const rng = engine.createRng(seed);
   const baseModel = engine.loadModel();
@@ -24,7 +25,7 @@ function main() {
     mlp,
   };
   let bestMlp = engine.cloneMlpModel(mlp);
-  let bestResult = engine.evaluateModelSuite(workingModel, evalGames, seed + 700001, repeats);
+  let bestResult = engine.evaluateModelSuite(workingModel, evalGames, seed + 700001, repeats, opponentModels);
   printEval("initial", bestResult);
 
   const history = [];
@@ -34,6 +35,7 @@ function main() {
       model: workingModel,
       games: gamesPerEpoch,
       exploration,
+      opponentModels,
     });
     const split = splitSamples(samples, rng, 0.88);
     const bidStats = trainHead(workingModel.mlp.bid, split.train.bid, {
@@ -54,7 +56,7 @@ function main() {
       bidLoss: lossForSamples(workingModel.mlp.bid, split.validation.bid),
       playLoss: lossForSamples(workingModel.mlp.play, split.validation.play),
     };
-    const evalResult = engine.evaluateModelSuite(workingModel, evalGames, seed + 700001 + epoch * 8191, repeats);
+    const evalResult = engine.evaluateModelSuite(workingModel, evalGames, seed + 700001 + epoch * 8191, repeats, opponentModels);
     const improved = evalResult.score > bestResult.score + 0.002;
     if (improved) {
       bestMlp = engine.cloneMlpModel(workingModel.mlp);
@@ -90,6 +92,7 @@ function main() {
       evalGames,
       repeats,
       exploration,
+      opponentModels: opponentModels.length,
       learningRate,
       batchSize,
       trainPasses,
@@ -147,7 +150,7 @@ function createHead(input, hidden, outputScale, rng) {
   };
 }
 
-function collectSamples({ rng, model, games, exploration }) {
+function collectSamples({ rng, model, games, exploration, opponentModels }) {
   const samples = {
     bid: [],
     play: [],
@@ -159,6 +162,7 @@ function collectSamples({ rng, model, games, exploration }) {
       learnerIndex,
       model,
       exploration,
+      opponentModels,
       collector: (sample) => {
         const target = rewardToTarget(sample.reward);
         const row = {

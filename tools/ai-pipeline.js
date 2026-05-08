@@ -10,6 +10,7 @@ const MODEL_BIN = path.join(ROOT, "assets/models/mighty-policy-v1.bin");
 const MLP_MODEL_JS = path.join(ROOT, "assets/models/mighty-mlp-policy-v2.js");
 const MLP_MODEL_BIN = path.join(ROOT, "assets/models/mighty-mlp-policy-v2.bin");
 const RUN_DIR = path.join(ROOT, "data/training-runs");
+const SNAPSHOT_DIR = path.join(RUN_DIR, "model-snapshots");
 
 function main() {
   const options = parseArgs(process.argv.slice(2));
@@ -29,8 +30,11 @@ function main() {
   ];
 
   fs.mkdirSync(RUN_DIR, { recursive: true });
+  fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });
   const startedAt = new Date();
   const modelBackup = backupModel();
+  const snapshotPath = snapshotCurrentMlp(startedAt, seed);
+  const opponentPaths = collectOpponentSnapshots(snapshotPath, Number(options.opponentGenerations || 8));
   const run = {
     startedAt: startedAt.toISOString(),
     options: {
@@ -43,6 +47,7 @@ function main() {
       mutation,
       minScoreDelta,
       trainer: options.mlp ? "mlp" : "linear",
+      opponentGenerations: opponentPaths.length,
       holdoutSeeds,
     },
     baseline: null,
@@ -54,18 +59,18 @@ function main() {
 
   try {
     console.log("== baseline holdout ==");
-    run.baseline = evaluateSuite(evalGames, holdoutSeeds);
+    run.baseline = evaluateSuite(evalGames, holdoutSeeds, opponentPaths);
     printSuite("baseline", run.baseline);
 
     console.log("== train candidate ==");
     const trainArgs = options.mlp
-      ? buildMlpTrainArgs(options, { seed, trainGames, evalGames, repeats })
-      : buildLinearTrainArgs(options, { seed, trainGames, iterations, candidates, repeats, mutation });
+      ? buildMlpTrainArgs(options, { seed, trainGames, evalGames, repeats, opponentPaths })
+      : buildLinearTrainArgs(options, { seed, trainGames, iterations, candidates, repeats, mutation, opponentPaths });
     run.trainingOutput = runNode(trainArgs);
     process.stdout.write(run.trainingOutput);
 
     console.log("== candidate holdout ==");
-    run.candidate = evaluateSuite(evalGames, holdoutSeeds);
+    run.candidate = evaluateSuite(evalGames, holdoutSeeds, opponentPaths);
     printSuite("candidate", run.candidate);
 
     const scoreDelta = run.candidate.average.score - run.baseline.average.score;
@@ -114,7 +119,7 @@ function parseArgs(args) {
   }, {});
 }
 
-function buildLinearTrainArgs(options, { seed, trainGames, iterations, candidates, repeats, mutation }) {
+function buildLinearTrainArgs(options, { seed, trainGames, iterations, candidates, repeats, mutation, opponentPaths }) {
   const args = [
     TRAINER,
     "--train",
@@ -128,10 +133,13 @@ function buildLinearTrainArgs(options, { seed, trainGames, iterations, candidate
   if (options.fresh) {
     args.push("--fresh");
   }
+  if (opponentPaths.length) {
+    args.push(`--opponent-mlp-paths=${opponentPaths.join(",")}`);
+  }
   return args;
 }
 
-function buildMlpTrainArgs(options, { seed, trainGames, evalGames, repeats }) {
+function buildMlpTrainArgs(options, { seed, trainGames, evalGames, repeats, opponentPaths }) {
   const args = [
     MLP_TRAINER,
     `--epochs=${Number(options.epochs || 8)}`,
@@ -149,7 +157,34 @@ function buildMlpTrainArgs(options, { seed, trainGames, evalGames, repeats }) {
   if (options.fresh) {
     args.push("--fresh");
   }
+  if (opponentPaths.length) {
+    args.push(`--opponent-mlp-paths=${opponentPaths.join(",")}`);
+  }
   return args;
+}
+
+function snapshotCurrentMlp(startedAt, seed) {
+  if (!fs.existsSync(MLP_MODEL_JS)) {
+    return null;
+  }
+  const stamp = startedAt.toISOString().replace(/[-:]/g, "").replace(/\..+$/, "").replace("T", "-");
+  const filePath = path.join(SNAPSHOT_DIR, `${stamp}-seed-${seed}.js`);
+  fs.copyFileSync(MLP_MODEL_JS, filePath);
+  return filePath;
+}
+
+function collectOpponentSnapshots(currentSnapshot, limit) {
+  const snapshots = fs.existsSync(SNAPSHOT_DIR)
+    ? fs
+        .readdirSync(SNAPSHOT_DIR)
+        .filter((name) => name.endsWith(".js"))
+        .map((name) => path.join(SNAPSHOT_DIR, name))
+        .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)
+    : [];
+  const ordered = currentSnapshot
+    ? [currentSnapshot, ...snapshots.filter((item) => item !== currentSnapshot)]
+    : snapshots;
+  return ordered.slice(0, Math.max(0, limit));
 }
 
 function toCamelCase(value) {
@@ -195,9 +230,13 @@ function restoreModel(backup) {
   }
 }
 
-function evaluateSuite(games, seeds) {
+function evaluateSuite(games, seeds, opponentPaths = []) {
   const results = seeds.map((seed) => {
-    const output = runNode([TRAINER, "--eval", `--games=${games}`, `--seed=${seed}`]);
+    const args = [TRAINER, "--eval", `--games=${games}`, `--seed=${seed}`];
+    if (opponentPaths.length) {
+      args.push(`--opponent-mlp-paths=${opponentPaths.join(",")}`);
+    }
+    const output = runNode(args);
     const result = parseEvalOutput(output);
     return {
       seed,

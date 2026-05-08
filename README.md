@@ -48,6 +48,7 @@ npm run ai:eval
 npm run ai:train -- --iterations=12 --candidates=10 --games=1200 --repeats=6 --seed=20260513
 npm run ai:pipeline -- --iterations=10 --candidates=8 --train-games=1400 --eval-games=4000 --repeats=6
 npm run ai:pipeline -- --mlp --fresh --epochs=8 --train-games=2200 --eval-games=3000 --inner-eval-games=1000 --repeats=5
+npm run ai:campaign -- --runs=20 --opponent-generations=8
 ```
 
 검증 예시:

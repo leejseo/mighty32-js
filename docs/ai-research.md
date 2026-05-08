@@ -32,6 +32,7 @@ Sources:
   - `assets/models/mighty-mlp-policy-v2.bin`
 - Added `tools/ai-pipeline.js` to run baseline evaluation, candidate training, holdout evaluation, and automatic rollback if the candidate fails the acceptance gate.
 - Added `tools/train-mlp-ai.js` for Monte-Carlo return training of bid/play MLP heads from self-play trajectories.
+- Added `tools/run-ai-campaign.js` for repeated pipeline runs that commit and push accepted model generations.
 
 ## Current Model
 
@@ -60,6 +61,8 @@ eval: score=0.0709 win=50.9% bid=18.0% dec=47.2% def=53.3% games=10000
 This is a modest edge, not a solved AI. The main gain is defensive play and more disciplined bidding. Declarer play remains the largest weakness.
 
 Training scripts and model artifacts should be committed. Pipeline run logs under `data/training-runs/` are intermediate local data and are ignored.
+
+To reduce overfitting to the current rulebase, the pipeline snapshots previous MLP generations under `data/training-runs/model-snapshots/` and mixes those older policies into non-learner seats during training and holdout evaluation. These snapshots are local intermediate data; only accepted runtime artifacts under `assets/models/` are committed.
 
 Latest accepted pipeline run:
 

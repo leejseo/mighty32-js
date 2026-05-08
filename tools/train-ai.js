@@ -70,9 +70,10 @@ function main() {
   const seed = Number(options.seed || 20260508);
   const games = Number(options.games || (mode === "train" ? 96 : 400));
   const model = options.fresh ? seedModel() : loadModel();
+  const opponentModels = loadOpponentModels(options.opponentMlpPaths);
 
   if (mode === "eval") {
-    const result = evaluateModel(model, games, seed);
+    const result = evaluateModel(model, games, seed, opponentModels);
     printEval("eval", result);
     return;
   }
@@ -86,9 +87,10 @@ function main() {
     candidates,
     mutation: Number(options.mutation || 0.18),
     repeats: Number(options.repeats || 4),
+    opponentModels,
   });
   writeModel(trained.model, trained.version + 1, trained.summary);
-  printEval("trained", evaluateModelSuite(trained.model, Math.max(games * 2, 300), seed + 99991, Number(options.repeats || 4)));
+  printEval("trained", evaluateModelSuite(trained.model, Math.max(games * 2, 300), seed + 99991, Number(options.repeats || 4), opponentModels));
 }
 
 function parseArgs(args) {
@@ -125,14 +127,34 @@ function loadModel() {
 }
 
 function loadMlpModel() {
+  return loadMlpModelFromFile(MLP_MODEL_JS);
+}
+
+function loadMlpModelFromFile(filePath) {
   try {
-    const code = fs.readFileSync(MLP_MODEL_JS, "utf8");
+    const code = fs.readFileSync(filePath, "utf8");
     const context = { window: {} };
-    vm.runInNewContext(code, context, { filename: MLP_MODEL_JS });
+    vm.runInNewContext(code, context, { filename: filePath });
     return normalizeMlpModel(context.window.MIGHTY32_MLP_MODEL);
   } catch {
     return null;
   }
+}
+
+function loadOpponentModels(pathsValue) {
+  if (!pathsValue) {
+    return [];
+  }
+  return String(pathsValue)
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((filePath) => {
+      const resolved = path.isAbsolute(filePath) ? filePath : path.join(ROOT, filePath);
+      const mlp = loadMlpModelFromFile(resolved);
+      return mlp ? { ...seedModel(), mlp } : null;
+    })
+    .filter(Boolean);
 }
 
 function seedModel() {
@@ -230,7 +252,7 @@ function normalizeNumberArray(values, length) {
 function trainModel(baseModel, options) {
   const rng = createRng(options.seed);
   let best = cloneModel(baseModel);
-  let bestResult = evaluateModelSuite(best, options.games, options.seed, options.repeats);
+  let bestResult = evaluateModelSuite(best, options.games, options.seed, options.repeats, options.opponentModels);
   let accepted = 0;
   printEval("initial", bestResult);
 
@@ -240,7 +262,7 @@ function trainModel(baseModel, options) {
     for (let candidateIndex = 0; candidateIndex < options.candidates; candidateIndex += 1) {
       const candidate = mutateModel(best, rng, options.mutation);
       const candidateSeed = options.seed + iteration * 10007 + candidateIndex * 997;
-      const candidateResult = evaluateModelSuite(candidate, options.games, candidateSeed, options.repeats);
+      const candidateResult = evaluateModelSuite(candidate, options.games, candidateSeed, options.repeats, options.opponentModels);
       if (candidateResult.score > roundResult.score + 0.015) {
         roundBest = candidate;
         roundResult = candidateResult;
@@ -267,7 +289,7 @@ function trainModel(baseModel, options) {
   };
 }
 
-function evaluateModelSuite(model, games, seed, repeats) {
+function evaluateModelSuite(model, games, seed, repeats, opponentModels = []) {
   const perRepeat = Math.max(20, Math.floor(games / Math.max(1, repeats)));
   const aggregate = {
     games: 0,
@@ -278,7 +300,7 @@ function evaluateModelSuite(model, games, seed, repeats) {
     defenseWinRate: 0,
   };
   for (let index = 0; index < repeats; index += 1) {
-    const result = evaluateModel(model, perRepeat, seed + index * 104729);
+    const result = evaluateModel(model, perRepeat, seed + index * 104729, opponentModels);
     aggregate.games += result.games;
     aggregate.score += result.score * result.games;
     aggregate.winRate += result.winRate * result.games;
@@ -347,7 +369,7 @@ function cloneMlpHead(head) {
   };
 }
 
-function evaluateModel(model, games, seed) {
+function evaluateModel(model, games, seed, opponentModels = []) {
   const rng = createRng(seed);
   let score = 0;
   let wins = 0;
@@ -359,7 +381,7 @@ function evaluateModel(model, games, seed) {
 
   for (let gameIndex = 0; gameIndex < games; gameIndex += 1) {
     const learnerIndex = gameIndex % 5;
-    const result = runGame({ rng, learnerIndex, model });
+    const result = runGame({ rng, learnerIndex, model, opponentModels });
     score += result.reward;
     wins += result.learnerWon ? 1 : 0;
     bids += result.learnerDeclared ? 1 : 0;
@@ -382,10 +404,10 @@ function evaluateModel(model, games, seed) {
   };
 }
 
-function runGame({ rng, learnerIndex, model, collector = null, exploration = 0 }) {
+function runGame({ rng, learnerIndex, model, collector = null, exploration = 0, opponentModels = [] }) {
   let game = null;
   for (let attempts = 0; attempts < 20; attempts += 1) {
-    game = createGame(rng, learnerIndex, model, collector, exploration);
+    game = createGame(rng, learnerIndex, model, collector, exploration, opponentModels);
     if (!game.dealMiss) {
       break;
     }
@@ -408,13 +430,21 @@ function runGame({ rng, learnerIndex, model, collector = null, exploration = 0 }
   return result;
 }
 
-function createGame(rng, learnerIndex, model, collector = null, exploration = 0) {
+function createGame(rng, learnerIndex, model, collector = null, exploration = 0, opponentModels = []) {
   const deck = shuffle(createDeck(), rng);
   const hands = [[], [], [], [], []];
   for (let i = 0; i < 50; i += 1) {
     hands[i % 5].push(deck[i]);
   }
   hands.forEach(sortHand);
+  const opponentAssignments = Array(5).fill(null);
+  if (opponentModels.length) {
+    for (let index = 0; index < 5; index += 1) {
+      if (index !== learnerIndex && rng() < 0.65) {
+        opponentAssignments[index] = opponentModels[Math.floor(rng() * opponentModels.length)];
+      }
+    }
+  }
   return {
     rng,
     learnerIndex,
@@ -441,6 +471,8 @@ function createGame(rng, learnerIndex, model, collector = null, exploration = 0)
     collector,
     exploration,
     decisionSamples: [],
+    opponentModels,
+    opponentAssignments,
   };
 }
 
@@ -450,7 +482,7 @@ function conductBidding(game, rng) {
   let passesSinceBid = 0;
   while (totalActions < 60) {
     if (!game.passed[currentPlayer]) {
-      const decision = chooseBid(game, currentPlayer, currentPlayer === game.learnerIndex, rng);
+      const decision = chooseBid(game, currentPlayer, getPolicyModelForPlayer(game, currentPlayer), rng);
       if (decision) {
         game.currentBid = { playerIndex: currentPlayer, trump: decision.trump, target: decision.target };
         passesSinceBid = 0;
@@ -501,7 +533,7 @@ function fallbackBid(game) {
   };
 }
 
-function chooseBid(game, playerIndex, useModel, rng) {
+function chooseBid(game, playerIndex, policyModel, rng) {
   const evaluation = evaluateBid(game, game.hands[playerIndex], playerIndex);
   const candidates = evaluation.candidates
     .map((candidate) => ({
@@ -516,7 +548,7 @@ function chooseBid(game, playerIndex, useModel, rng) {
         : target - getOpeningBidFloor(candidate.trump);
       const failure = evaluateBidFailureRisk(candidate, target);
       const enriched = { ...candidate, target, pressure, failure };
-      const policyScore = useModel ? evaluateModelBid(game, enriched, playerIndex) : 0;
+      const policyScore = policyModel ? evaluateModelBid(game, enriched, playerIndex, policyModel) : 0;
       return {
         ...enriched,
         score:
@@ -539,13 +571,13 @@ function chooseBid(game, playerIndex, useModel, rng) {
   if (best.score < threshold || best.failure.successChance < minimumBidSuccessChance(best.target)) {
     return null;
   }
-  const chosen = useModel ? selectExplorationCandidate(game, candidates, 0.55) : best;
-  if (useModel && game.collector) {
+  const chosen = policyModel ? selectExplorationCandidate(game, candidates, 0.55) : best;
+  if (playerIndex === game.learnerIndex && game.collector) {
     game.decisionSamples.push({
       kind: "bid",
       features: buildBidFeatures(game, chosen, playerIndex),
-      policyScore: evaluateModelBid(game, chosen, playerIndex),
-      ruleScore: chosen.score - evaluateModelBid(game, chosen, playerIndex),
+      policyScore: evaluateModelBid(game, chosen, playerIndex, policyModel),
+      ruleScore: chosen.score - evaluateModelBid(game, chosen, playerIndex, policyModel),
       target: chosen.target,
       trump: chosen.trump,
       trickNumber: 0,
@@ -619,7 +651,7 @@ function chooseBidTarget(candidate, rng) {
 }
 
 function chooseContractAndFriend(game, rng) {
-  const decision = chooseBid(game, game.declarerIndex, game.declarerIndex === game.learnerIndex, rng);
+  const decision = chooseBid(game, game.declarerIndex, getPolicyModelForPlayer(game, game.declarerIndex), rng);
   if (decision && bidBeats(decision, game.currentBid)) {
     game.currentBid = { playerIndex: game.declarerIndex, trump: decision.trump, target: decision.target };
     game.trump = decision.trump;
@@ -678,7 +710,7 @@ function playRound(game, rng) {
     game.jokerCallActive = false;
     let player = game.leaderIndex;
     for (let seat = 0; seat < 5; seat += 1) {
-      const card = chooseCard(game, player, player === game.learnerIndex);
+      const card = chooseCard(game, player, getPolicyModelForPlayer(game, player));
       if (!card) {
         throw new Error(`No legal card for player ${player}`);
       }
@@ -699,7 +731,7 @@ function playRound(game, rng) {
   }
 }
 
-function chooseCard(game, playerIndex, useModel) {
+function chooseCard(game, playerIndex, policyModel) {
   const legalCards = game.hands[playerIndex].filter((card) => isLegalPlay(game, playerIndex, card));
   if (!legalCards.length) {
     return null;
@@ -710,17 +742,17 @@ function chooseCard(game, playerIndex, useModel) {
       return {
         card,
         outcome,
-        score: evaluateCardChoice(game, playerIndex, card, legalCards, outcome, useModel),
+        score: evaluateCardChoice(game, playerIndex, card, legalCards, outcome, policyModel),
       };
     })
     .sort((a, b) => b.score - a.score || aiCardSpendCost(game, a.card) - aiCardSpendCost(game, b.card));
-  const chosen = useModel ? selectExplorationCandidate(game, candidates, 2.2) : candidates[0];
-  if (useModel && game.collector) {
+  const chosen = policyModel ? selectExplorationCandidate(game, candidates, 2.2) : candidates[0];
+  if (playerIndex === game.learnerIndex && game.collector) {
     game.decisionSamples.push({
       kind: "play",
       features: buildPlayFeatures(game, playerIndex, chosen.card, legalCards, chosen.outcome),
-      policyScore: evaluateModelPlay(game, playerIndex, chosen.card, legalCards, chosen.outcome),
-      ruleScore: chosen.score - evaluateModelPlay(game, playerIndex, chosen.card, legalCards, chosen.outcome),
+      policyScore: evaluateModelPlay(game, playerIndex, chosen.card, legalCards, chosen.outcome, policyModel),
+      ruleScore: chosen.score - evaluateModelPlay(game, playerIndex, chosen.card, legalCards, chosen.outcome, policyModel),
       cardId: chosen.card.id,
       trickNumber: game.trickNumber,
       isLead: game.trick.length === 0,
@@ -729,7 +761,7 @@ function chooseCard(game, playerIndex, useModel) {
   return chosen.card;
 }
 
-function evaluateCardChoice(game, playerIndex, card, legalCards, outcome, useModel) {
+function evaluateCardChoice(game, playerIndex, card, legalCards, outcome, policyModel) {
   const playerSide = getSide(game, playerIndex);
   const winnerSide = getSide(game, outcome.winner);
   const trickPoints = game.trick.filter((entry) => isPointCard(entry.card)).length + (isPointCard(card) ? 1 : 0);
@@ -768,8 +800,8 @@ function evaluateCardChoice(game, playerIndex, card, legalCards, outcome, useMod
     score -= 36;
   }
   score -= aiCardSpendCost(game, card) * (getSide(game, outcome.winner) === playerSide ? 0.07 : 0.16);
-  if (useModel) {
-    score += evaluateModelPlay(game, playerIndex, card, legalCards, outcome);
+  if (policyModel) {
+    score += evaluateModelPlay(game, playerIndex, card, legalCards, outcome, policyModel);
   }
   return score;
 }
@@ -873,11 +905,18 @@ function selectExplorationCandidate(game, candidates, temperature = 1) {
   return pool[0];
 }
 
-function evaluateModelBid(game, candidate, playerIndex) {
+function getPolicyModelForPlayer(game, playerIndex) {
+  if (playerIndex === game.learnerIndex) {
+    return game.model;
+  }
+  return game.opponentAssignments?.[playerIndex] || null;
+}
+
+function evaluateModelBid(game, candidate, playerIndex, model = game.model) {
   const features = buildBidFeatures(game, candidate, playerIndex);
-  const linearScore = dot(game.model.bidWeights, features) * game.model.bidScale;
-  const mlpScore = game.model.mlp?.enabled !== false && game.model.mlp?.bid
-    ? evaluateMlpHead(game.model.mlp.bid, features)
+  const linearScore = dot(model.bidWeights, features) * model.bidScale;
+  const mlpScore = model.mlp?.enabled !== false && model.mlp?.bid
+    ? evaluateMlpHead(model.mlp.bid, features)
     : 0;
   return clamp(linearScore + mlpScore, -3.4, 3.4);
 }
@@ -910,11 +949,11 @@ function buildBidFeatures(game, candidate, playerIndex) {
   ];
 }
 
-function evaluateModelPlay(game, playerIndex, card, legalCards, outcome) {
+function evaluateModelPlay(game, playerIndex, card, legalCards, outcome, model = game.model) {
   const features = buildPlayFeatures(game, playerIndex, card, legalCards, outcome);
-  const linearScore = dot(game.model.playWeights, features) * game.model.playScale;
-  const mlpScore = game.model.mlp?.enabled !== false && game.model.mlp?.play
-    ? evaluateMlpHead(game.model.mlp.play, features)
+  const linearScore = dot(model.playWeights, features) * model.playScale;
+  const mlpScore = model.mlp?.enabled !== false && model.mlp?.play
+    ? evaluateMlpHead(model.mlp.play, features)
     : 0;
   return clamp(linearScore + mlpScore, -22, 22);
 }
@@ -1575,6 +1614,8 @@ if (require.main === module) {
     evaluateModelSuite,
     loadModel,
     loadMlpModel,
+    loadMlpModelFromFile,
+    loadOpponentModels,
     normalizeMlpModel,
     cloneModel,
     cloneMlpModel,

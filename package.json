@@ -8,6 +8,7 @@
     "ai:eval": "node tools/train-ai.js --eval --games=10000",
     "ai:train": "node tools/train-ai.js --train",
     "ai:pipeline": "node tools/ai-pipeline.js",
-    "ai:train-mlp": "node tools/train-mlp-ai.js"
+    "ai:train-mlp": "node tools/train-mlp-ai.js",
+    "ai:campaign": "node tools/run-ai-campaign.js"
   }
 }
