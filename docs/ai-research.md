@@ -40,9 +40,9 @@ The runtime model is still small enough for static hosting, but no longer just a
 - Bid head: 16 linear features.
 - Play head: 28 linear features.
 - Linear binary size: 188 bytes.
-- MLP bid head: 16 inputs, 32 hidden units.
-- MLP play head: 28 inputs, 64 hidden units.
-- MLP binary size: about 9.8 KB.
+- MLP bid head: 16 inputs, 64 hidden units.
+- MLP play head: 28 inputs, 128 hidden units.
+- MLP binary size: about 20 KB.
 - Browser runtime: plain JavaScript plus optional static binary fetch.
 
 Latest validation command:
@@ -54,7 +54,7 @@ node tools/train-ai.js --eval --games=10000 --seed=20261101
 Observed result:
 
 ```text
-eval: score=0.0305 win=50.0% bid=20.4% dec=45.6% def=52.9% games=10000
+eval: score=0.0709 win=50.9% bid=18.0% dec=47.2% def=53.3% games=10000
 ```
 
 This is a modest edge, not a solved AI. The main gain is defensive play and more disciplined bidding. Declarer play remains the largest weakness.
@@ -72,9 +72,9 @@ accepted: score delta 0.0036, win delta -0.17pp
 Latest accepted MLP run:
 
 ```text
-baseline holdout:  score=0.0332 win=50.2% bid=21.7% dec=45.0% def=53.7% games=9000
-candidate holdout: score=0.0569 win=50.5% bid=20.3% dec=45.5% def=53.8% games=9000
-accepted: score delta 0.0237, win delta 0.23pp
+baseline holdout:  score=0.0384 win=50.0% bid=20.2% dec=45.6% def=53.0% games=15000
+candidate holdout: score=0.1083 win=51.5% bid=18.3% dec=48.7% def=53.3% games=15000
+accepted: score delta 0.0699, win delta 1.47pp
 ```
 
 ## GitHub Pages Feasibility
