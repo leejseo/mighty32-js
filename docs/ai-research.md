@@ -55,7 +55,7 @@ node tools/train-ai.js --eval --games=10000 --seed=20261101
 Observed result:
 
 ```text
-eval: score=0.0709 win=50.9% bid=18.0% dec=47.2% def=53.3% games=10000
+eval: score=0.0573 win=50.6% bid=18.3% dec=47.0% def=52.9% games=10000
 ```
 
 This is a modest edge, not a solved AI. The main gain is defensive play and more disciplined bidding. Declarer play remains the largest weakness.
@@ -78,6 +78,20 @@ Latest accepted MLP run:
 baseline holdout:  score=0.0384 win=50.0% bid=20.2% dec=45.6% def=53.0% games=15000
 candidate holdout: score=0.1083 win=51.5% bid=18.3% dec=48.7% def=53.3% games=15000
 accepted: score delta 0.0699, win delta 1.47pp
+```
+
+Latest 20-run campaign with prior-generation opponents:
+
+```text
+runs: 20
+accepted: 4 (runs 4, 7, 8, 11)
+reverted: 16
+latest accepted commits:
+- 200452a Improve MLP policy campaign run 4
+- e4f1aa1 Improve MLP policy campaign run 7
+- 7feed35 Improve MLP policy campaign run 8
+- daaa1ba Improve MLP policy campaign run 11
+final sanity eval: score=0.0573 win=50.6% bid=18.3% dec=47.0% def=52.9% games=10000
 ```
 
 ## GitHub Pages Feasibility

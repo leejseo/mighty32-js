@@ -55,7 +55,7 @@ npm run ai:campaign -- --runs=20 --opponent-generations=8
 
 ```text
 node tools/train-ai.js --eval --games=10000 --seed=20261101
-eval: score=0.0709 win=50.9% bid=18.0% dec=47.2% def=53.3% games=10000
+eval: score=0.0573 win=50.6% bid=18.3% dec=47.0% def=52.9% games=10000
 ```
 
 관련 연구 노트는 `docs/ai-research.md`에 정리했습니다.
