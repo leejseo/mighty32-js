@@ -153,7 +153,19 @@ function buildMlpTrainArgs(options, { seed, trainGames, evalGames, repeats, oppo
     `--train-passes=${Number(options.trainPasses || 3)}`,
     `--bid-hidden=${Number(options.bidHidden || 32)}`,
     `--play-hidden=${Number(options.playHidden || 64)}`,
+    `--replay-samples=${Number(options.replaySamples || 60000)}`,
+    `--replay-ratio=${Number(options.replayRatio || 0.75)}`,
+    `--validation-replay-samples=${Number(options.validationReplaySamples || 12000)}`,
   ];
+  if (options.saveDataset === "false") {
+    args.push("--save-dataset=false");
+  }
+  if (options.trainBid === "false") {
+    args.push("--train-bid=false");
+  }
+  if (options.trainPlay === "false") {
+    args.push("--train-play=false");
+  }
   if (options.fresh) {
     args.push("--fresh");
   }

@@ -43,24 +43,27 @@ PORT=5173 npm start
 
 현재 앱은 기존 룰베이스 평가에 선형 정책 모델과 작은 MLP 정책 모델을 더합니다. 모델은 GitHub Pages에서도 그대로 받을 수 있는 정적 JS/바이너리 파일입니다.
 
+MLP 학습은 self-play 중 5명 전원의 입찰/플레이 decision을 각 플레이어 관점 reward로 저장하고, `data/training-datasets/`의 JSONL shard를 replay buffer처럼 다시 섞어 씁니다. 이 데이터셋은 중간 산출물이므로 Git에는 올리지 않고, accepted 모델 JS/바이너리만 커밋합니다.
+
 ```bash
 npm run ai:eval
 npm run ai:train -- --iterations=12 --candidates=10 --games=1200 --repeats=6 --seed=20260513
 npm run ai:pipeline -- --iterations=10 --candidates=8 --train-games=1400 --eval-games=4000 --repeats=6
 npm run ai:pipeline -- --mlp --fresh --epochs=8 --train-games=2200 --eval-games=3000 --inner-eval-games=1000 --repeats=5
+npm run ai:pipeline -- --mlp --epochs=5 --train-games=2400 --eval-games=6000 --repeats=6 --train-play=false
 npm run ai:campaign -- --runs=20 --opponent-generations=8
 ```
 
 검증 예시:
 
 ```text
-node tools/train-ai.js --eval --games=10000 --seed=20261101
-eval: score=0.0573 win=50.6% bid=18.3% dec=47.0% def=52.9% games=10000
+node tools/train-ai.js --eval --games=15000 --seed=20261109
+eval: score=0.0930 win=51.3% bid=18.7% dec=47.0% def=54.1% games=15000
 ```
 
 관련 연구 노트는 `docs/ai-research.md`에 정리했습니다.
 
-`tools/`의 학습 스크립트와 `assets/models/*.js`, `assets/models/*.bin`은 커밋 대상입니다. `data/training-runs/`에는 파이프라인 실행 로그와 후보 검증 결과가 저장되며 중간 데이터라서 Git에서는 제외합니다.
+`tools/`의 학습 스크립트와 `assets/models/*.js`, `assets/models/*.bin`은 커밋 대상입니다. `data/training-runs/`에는 파이프라인 실행 로그와 후보 검증 결과가 저장되고, `data/training-datasets/`에는 replay 학습 shard와 manifest가 저장됩니다. 둘 다 중간 데이터라서 Git에서는 제외합니다.
 
 ## GitHub Pages
 
@@ -77,6 +80,8 @@ On GitHub Pages, game records are not saved. The Pages workflow writes `pages-co
 ## Data
 
 완료된 게임 기록은 서버 실행 중 `data/games.jsonl`에 저장됩니다. 이 파일은 개인 플레이 기록이므로 Git에는 포함하지 않습니다.
+
+AI 학습 중간 데이터는 `data/training-datasets/`와 `data/training-runs/`에 저장됩니다. 학습을 많이 돌릴수록 수백 MB에서 GB 단위로 커질 수 있으며, 재현 가능한 스크립트와 최종 모델 artifact만 커밋합니다.
 
 `data/README.md`는 데이터 디렉터리 용도를 설명하기 위해 커밋합니다.
 

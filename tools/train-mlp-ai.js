@@ -1,4 +1,11 @@
+const fs = require("node:fs");
+const path = require("node:path");
 const engine = require("./train-ai.js");
+
+const ROOT = path.join(__dirname, "..");
+const DATASET_DIR = path.join(ROOT, "data/training-datasets");
+const SHARD_DIR = path.join(DATASET_DIR, "shards");
+const MANIFEST_PATH = path.join(DATASET_DIR, "manifest.jsonl");
 
 function main() {
   const options = parseArgs(process.argv.slice(2));
@@ -14,6 +21,12 @@ function main() {
   const bidHidden = Number(options.bidHidden || 32);
   const playHidden = Number(options.playHidden || 64);
   const opponentModels = engine.loadOpponentModels(options.opponentMlpPaths);
+  const saveDataset = options.saveDataset !== "false";
+  const replaySamples = Number(options.replaySamples || 60000);
+  const replayRatio = Number(options.replayRatio || 0.75);
+  const validationReplaySamples = Number(options.validationReplaySamples || 12000);
+  const trainBid = options.trainBid !== "false";
+  const trainPlay = options.trainPlay !== "false";
 
   const rng = engine.createRng(seed);
   const baseModel = engine.loadModel();
@@ -36,25 +49,60 @@ function main() {
       games: gamesPerEpoch,
       exploration,
       opponentModels,
+      seed: seed + epoch * 9176,
+      epoch,
+    });
+    const replay = loadReplaySamples({
+      rng,
+      maxSamples: replaySamples,
+      validationSamples: validationReplaySamples,
     });
     const split = splitSamples(samples, rng, 0.88);
-    const bidStats = trainHead(workingModel.mlp.bid, split.train.bid, {
-      rng,
-      learningRate,
-      batchSize,
-      passes: trainPasses,
-      l2: 0.00008,
-    });
-    const playStats = trainHead(workingModel.mlp.play, split.train.play, {
-      rng,
-      learningRate,
-      batchSize,
-      passes: trainPasses,
-      l2: 0.00005,
-    });
+    if (saveDataset) {
+      writeDatasetShard(samples, {
+        seed,
+        epoch,
+        games: gamesPerEpoch,
+        exploration,
+        modelVersion: workingModel.mlp.version || 0,
+        opponentModels: opponentModels.length,
+      });
+    }
+    const trainSamples = {
+      bid: mergeReplay(split.train.bid, replay.train.bid, replayRatio, rng),
+      play: mergeReplay(split.train.play, replay.train.play, replayRatio, rng),
+    };
+    const validationSamples = {
+      bid: mergeReplay(split.validation.bid, replay.validation.bid, 0.35, rng),
+      play: mergeReplay(split.validation.play, replay.validation.play, 0.35, rng),
+    };
+    const bidStats = trainBid
+      ? trainHead(workingModel.mlp.bid, trainSamples.bid, {
+          rng,
+          learningRate,
+          batchSize,
+          passes: trainPasses,
+          l2: 0.00008,
+        })
+      : skippedHeadStats(workingModel.mlp.bid, trainSamples.bid);
+    const playStats = trainPlay
+      ? trainHead(workingModel.mlp.play, trainSamples.play, {
+          rng,
+          learningRate,
+          batchSize,
+          passes: trainPasses,
+          l2: 0.00005,
+        })
+      : skippedHeadStats(workingModel.mlp.play, trainSamples.play);
     const validation = {
-      bidLoss: lossForSamples(workingModel.mlp.bid, split.validation.bid),
-      playLoss: lossForSamples(workingModel.mlp.play, split.validation.play),
+      bidLoss: lossForSamples(workingModel.mlp.bid, validationSamples.bid),
+      playLoss: lossForSamples(workingModel.mlp.play, validationSamples.play),
+      replay: {
+        trainBid: trainSamples.bid.length - split.train.bid.length,
+        trainPlay: trainSamples.play.length - split.train.play.length,
+        validationBid: validationSamples.bid.length - split.validation.bid.length,
+        validationPlay: validationSamples.play.length - split.validation.play.length,
+      },
     };
     const evalResult = engine.evaluateModelSuite(workingModel, evalGames, seed + 700001 + epoch * 8191, repeats, opponentModels);
     const improved = evalResult.score > bestResult.score + 0.002;
@@ -69,6 +117,8 @@ function main() {
       samples: {
         bid: samples.bid.length,
         play: samples.play.length,
+        replayBid: validation.replay.trainBid,
+        replayPlay: validation.replay.trainPlay,
       },
       bidStats,
       playStats,
@@ -96,6 +146,12 @@ function main() {
       learningRate,
       batchSize,
       trainPasses,
+      saveDataset,
+      replaySamples,
+      replayRatio,
+      validationReplaySamples,
+      trainBid,
+      trainPlay,
       bestScore: bestResult.score,
       history,
       bidFeatures: engine.BID_FEATURES,
@@ -150,7 +206,7 @@ function createHead(input, hidden, outputScale, rng) {
   };
 }
 
-function collectSamples({ rng, model, games, exploration, opponentModels }) {
+function collectSamples({ rng, model, games, exploration, opponentModels, seed, epoch }) {
   const samples = {
     bid: [],
     play: [],
@@ -166,9 +222,29 @@ function collectSamples({ rng, model, games, exploration, opponentModels }) {
       collector: (sample) => {
         const target = rewardToTarget(sample.reward);
         const row = {
+          id: `${seed}:${epoch}:${gameIndex}:${sample.kind}:${samples.bid.length + samples.play.length}`,
+          seed,
+          epoch,
+          gameIndex,
+          learnerIndex,
+          actorIndex: Number.isInteger(sample.actorIndex) ? sample.actorIndex : learnerIndex,
+          kind: sample.kind,
+          split: chooseSplit(seed, epoch, gameIndex, sample.kind, samples.bid.length + samples.play.length),
           features: sample.features,
           target,
           weight: sampleWeight(sample),
+          reward: roundSampleNumber(sample.reward),
+          actorWon: Boolean(sample.actorWon),
+          actorDeclarerSide: Boolean(sample.actorDeclarerSide),
+          actorDeclared: Boolean(sample.actorDeclared),
+          learnerWon: Boolean(sample.learnerWon),
+          learnerDeclarerSide: Boolean(sample.learnerDeclarerSide),
+          learnerDeclared: Boolean(sample.learnerDeclared),
+          trickNumber: sample.trickNumber || 0,
+          isLead: Boolean(sample.isLead),
+          cardId: sample.cardId || null,
+          trump: sample.trump || null,
+          contractTarget: sample.target || null,
         };
         if (sample.kind === "bid") {
           samples.bid.push(row);
@@ -179,6 +255,17 @@ function collectSamples({ rng, model, games, exploration, opponentModels }) {
     });
   }
   return samples;
+}
+
+function chooseSplit(seed, epoch, gameIndex, kind, offset) {
+  const value = hashString(`${seed}:${epoch}:${gameIndex}:${kind}:${offset}`) % 1000;
+  if (value < 850) {
+    return "train";
+  }
+  if (value < 950) {
+    return "validation";
+  }
+  return "test";
 }
 
 function rewardToTarget(reward) {
@@ -194,18 +281,136 @@ function sampleWeight(sample) {
 function splitSamples(samples, rng, trainRatio) {
   return {
     train: {
-      bid: takeSplit(samples.bid, rng, trainRatio, true),
-      play: takeSplit(samples.play, rng, trainRatio, true),
+      bid: takeSplit(samples.bid, rng, trainRatio, true, "train"),
+      play: takeSplit(samples.play, rng, trainRatio, true, "train"),
     },
     validation: {
-      bid: takeSplit(samples.bid, rng, trainRatio, false),
-      play: takeSplit(samples.play, rng, trainRatio, false),
+      bid: takeSplit(samples.bid, rng, trainRatio, false, "validation"),
+      play: takeSplit(samples.play, rng, trainRatio, false, "validation"),
     },
   };
 }
 
-function takeSplit(samples, rng, trainRatio, wantTrain) {
+function takeSplit(samples, rng, trainRatio, wantTrain, preferredSplit) {
+  const splitRows = samples.filter((sample) => sample.split === preferredSplit);
+  if (splitRows.length) {
+    return splitRows;
+  }
   return samples.filter(() => (rng() < trainRatio) === wantTrain);
+}
+
+function mergeReplay(current, replay, replayRatio, rng) {
+  if (!replay.length || replayRatio <= 0) {
+    return current.slice();
+  }
+  const replayLimit = Math.min(replay.length, Math.ceil(current.length * replayRatio));
+  const selectedReplay = sampleRows(replay, replayLimit, rng);
+  return current.concat(selectedReplay);
+}
+
+function sampleRows(rows, limit, rng) {
+  if (rows.length <= limit) {
+    return rows.slice();
+  }
+  const copy = rows.slice();
+  shuffleInPlace(copy, rng);
+  return copy.slice(0, limit);
+}
+
+function writeDatasetShard(samples, metadata) {
+  fs.mkdirSync(SHARD_DIR, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, "").replace("T", "-");
+  const shardName = `${stamp}-seed-${metadata.seed}-epoch-${String(metadata.epoch).padStart(2, "0")}.jsonl`;
+  const shardPath = path.join(SHARD_DIR, shardName);
+  const rows = samples.bid.concat(samples.play);
+  const content = rows.map((row) => JSON.stringify(row)).join("\n");
+  fs.writeFileSync(shardPath, `${content}\n`);
+  const splitCounts = rows.reduce((counts, row) => {
+    counts[row.kind] = counts[row.kind] || { train: 0, validation: 0, test: 0 };
+    counts[row.kind][row.split] += 1;
+    return counts;
+  }, {});
+  const manifest = {
+    createdAt: new Date().toISOString(),
+    shard: path.relative(ROOT, shardPath),
+    rows: rows.length,
+    splitCounts,
+    metadata,
+  };
+  fs.mkdirSync(DATASET_DIR, { recursive: true });
+  fs.appendFileSync(MANIFEST_PATH, `${JSON.stringify(manifest)}\n`);
+}
+
+function loadReplaySamples({ rng, maxSamples, validationSamples }) {
+  const replay = {
+    train: { bid: [], play: [] },
+    validation: { bid: [], play: [] },
+  };
+  const shards = listDatasetShards();
+  if (!shards.length || maxSamples <= 0) {
+    return replay;
+  }
+  const trainLimitByKind = Math.floor(maxSamples / 2);
+  const validationLimitByKind = Math.floor(validationSamples / 2);
+  for (const shardPath of shards) {
+    if (
+      replay.train.bid.length >= trainLimitByKind &&
+      replay.train.play.length >= trainLimitByKind &&
+      replay.validation.bid.length >= validationLimitByKind &&
+      replay.validation.play.length >= validationLimitByKind
+    ) {
+      break;
+    }
+    const lines = fs.readFileSync(shardPath, "utf8").split("\n").filter(Boolean);
+    shuffleInPlace(lines, rng);
+    for (const line of lines) {
+      const row = parseReplayRow(line);
+      if (!row) {
+        continue;
+      }
+      const split = row.split === "validation" || row.split === "test" ? "validation" : "train";
+      const limit = split === "train" ? trainLimitByKind : validationLimitByKind;
+      const bucket = replay[split][row.kind];
+      if (bucket.length < limit) {
+        bucket.push(row);
+      }
+    }
+  }
+  return replay;
+}
+
+function listDatasetShards() {
+  if (!fs.existsSync(SHARD_DIR)) {
+    return [];
+  }
+  return fs
+    .readdirSync(SHARD_DIR)
+    .filter((name) => name.endsWith(".jsonl"))
+    .map((name) => path.join(SHARD_DIR, name))
+    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+}
+
+function parseReplayRow(line) {
+  try {
+    const row = JSON.parse(line);
+    if (
+      !row ||
+      (row.kind !== "bid" && row.kind !== "play") ||
+      !Array.isArray(row.features) ||
+      !Number.isFinite(row.target)
+    ) {
+      return null;
+    }
+    return {
+      features: row.features.map((value) => Number(value) || 0),
+      target: Number(row.target),
+      weight: Number(row.weight || 1),
+      split: row.split || "train",
+      kind: row.kind,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function trainHead(head, samples, options) {
@@ -226,6 +431,14 @@ function trainHead(head, samples, options) {
     loss: loss / Math.max(1, updates),
     samples: samples.length,
     updates,
+  };
+}
+
+function skippedHeadStats(head, samples) {
+  return {
+    loss: lossForSamples(head, samples),
+    samples: samples.length,
+    updates: 0,
   };
 }
 
@@ -316,6 +529,7 @@ function huberLoss(error) {
 function printEpoch(epoch, samples, bidStats, playStats, validation, evalResult, improved) {
   console.log(
     `epoch ${epoch}: samples bid=${samples.bid.length} play=${samples.play.length} ` +
+      `replay bid=${validation.replay.trainBid} play=${validation.replay.trainPlay} ` +
       `trainLoss bid=${bidStats.loss.toFixed(4)} play=${playStats.loss.toFixed(4)} ` +
       `valLoss bid=${validation.bidLoss.toFixed(4)} play=${validation.playLoss.toFixed(4)} ` +
       `score=${evalResult.score.toFixed(4)} win=${(evalResult.winRate * 100).toFixed(1)}% ` +
@@ -346,6 +560,19 @@ function gaussian(rng) {
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function roundSampleNumber(value) {
+  return Number((Number(value) || 0).toFixed(5));
+}
+
+function hashString(value) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
 }
 
 main();

@@ -418,9 +418,13 @@ function runGame({ rng, learnerIndex, model, collector = null, exploration = 0, 
   const result = scoreGame(game);
   if (collector && game.decisionSamples?.length) {
     for (const sample of game.decisionSamples) {
+      const actorResult = scoreGameForPlayer(game, sample.actorIndex ?? game.learnerIndex);
       collector({
         ...sample,
-        reward: result.reward,
+        reward: actorResult.reward,
+        actorWon: actorResult.won,
+        actorDeclarerSide: actorResult.declarerSide,
+        actorDeclared: actorResult.declared,
         learnerWon: result.learnerWon,
         learnerDeclarerSide: result.learnerDeclarerSide,
         learnerDeclared: result.learnerDeclared,
@@ -572,12 +576,14 @@ function chooseBid(game, playerIndex, policyModel, rng) {
     return null;
   }
   const chosen = policyModel ? selectExplorationCandidate(game, candidates, 0.55) : best;
-  if (playerIndex === game.learnerIndex && game.collector) {
+  if (game.collector) {
+    const policyScore = policyModel ? evaluateModelBid(game, chosen, playerIndex, policyModel) : 0;
     game.decisionSamples.push({
+      actorIndex: playerIndex,
       kind: "bid",
       features: buildBidFeatures(game, chosen, playerIndex),
-      policyScore: evaluateModelBid(game, chosen, playerIndex, policyModel),
-      ruleScore: chosen.score - evaluateModelBid(game, chosen, playerIndex, policyModel),
+      policyScore,
+      ruleScore: chosen.score - policyScore,
       target: chosen.target,
       trump: chosen.trump,
       trickNumber: 0,
@@ -747,12 +753,14 @@ function chooseCard(game, playerIndex, policyModel) {
     })
     .sort((a, b) => b.score - a.score || aiCardSpendCost(game, a.card) - aiCardSpendCost(game, b.card));
   const chosen = policyModel ? selectExplorationCandidate(game, candidates, 2.2) : candidates[0];
-  if (playerIndex === game.learnerIndex && game.collector) {
+  if (game.collector) {
+    const policyScore = policyModel ? evaluateModelPlay(game, playerIndex, chosen.card, legalCards, chosen.outcome, policyModel) : 0;
     game.decisionSamples.push({
+      actorIndex: playerIndex,
       kind: "play",
       features: buildPlayFeatures(game, playerIndex, chosen.card, legalCards, chosen.outcome),
-      policyScore: evaluateModelPlay(game, playerIndex, chosen.card, legalCards, chosen.outcome, policyModel),
-      ruleScore: chosen.score - evaluateModelPlay(game, playerIndex, chosen.card, legalCards, chosen.outcome, policyModel),
+      policyScore,
+      ruleScore: chosen.score - policyScore,
       cardId: chosen.card.id,
       trickNumber: game.trickNumber,
       isLead: game.trick.length === 0,
@@ -1012,6 +1020,17 @@ function buildPlayFeatures(game, playerIndex, card, legalCards, outcome) {
 }
 
 function scoreGame(game) {
+  const context = getScoreContext(game);
+  const learnerResult = scoreGameForPlayer(game, game.learnerIndex, context);
+  return {
+    reward: learnerResult.reward,
+    learnerWon: learnerResult.won,
+    learnerDeclarerSide: learnerResult.declarerSide,
+    learnerDeclared: learnerResult.declared,
+  };
+}
+
+function getScoreContext(game) {
   const buriedPoints = game.buried.filter(isPointCard).length;
   const declarerTeam = [game.declarerIndex];
   if (game.friendIndex !== null && game.friendIndex !== game.declarerIndex) {
@@ -1019,15 +1038,23 @@ function scoreGame(game) {
   }
   const declarerPoints = declarerTeam.reduce((sum, index) => sum + game.captured[index].filter(isPointCard).length, buriedPoints);
   const success = declarerPoints >= game.target;
-  const learnerDeclarerSide = declarerTeam.includes(game.learnerIndex);
-  const learnerWon = learnerDeclarerSide ? success : !success;
   const margin = success ? declarerPoints - game.target + 1 : game.target - declarerPoints + 1;
-  const reward = (learnerWon ? 1 : -1) * (1 + margin * 0.32 + (game.target - 13) * 0.05);
+  return {
+    declarerTeam,
+    success,
+    margin,
+  };
+}
+
+function scoreGameForPlayer(game, playerIndex, context = getScoreContext(game)) {
+  const declarerSide = context.declarerTeam.includes(playerIndex);
+  const won = declarerSide ? context.success : !context.success;
+  const reward = (won ? 1 : -1) * (1 + context.margin * 0.32 + (game.target - 13) * 0.05);
   return {
     reward,
-    learnerWon,
-    learnerDeclarerSide,
-    learnerDeclared: game.declarerIndex === game.learnerIndex,
+    won,
+    declarerSide,
+    declared: game.declarerIndex === playerIndex,
   };
 }
 

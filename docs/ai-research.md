@@ -33,6 +33,8 @@ Sources:
 - Added `tools/ai-pipeline.js` to run baseline evaluation, candidate training, holdout evaluation, and automatic rollback if the candidate fails the acceptance gate.
 - Added `tools/train-mlp-ai.js` for Monte-Carlo return training of bid/play MLP heads from self-play trajectories.
 - Added `tools/run-ai-campaign.js` for repeated pipeline runs that commit and push accepted model generations.
+- Expanded the MLP dataset pipeline from learner-only rows to all five players' real decisions. Rewards are recalculated from each actor's side, then persisted as JSONL shards under `data/training-datasets/`.
+- Added replay-buffer training over persisted shards, deterministic train/validation/test row splits, prior-generation opponent sampling, and `--train-bid=false` / `--train-play=false` ablation controls.
 
 ## Current Model
 
@@ -49,18 +51,18 @@ The runtime model is still small enough for static hosting, but no longer just a
 Latest validation command:
 
 ```bash
-node tools/train-ai.js --eval --games=10000 --seed=20261101
+node tools/train-ai.js --eval --games=15000 --seed=20261109
 ```
 
 Observed result:
 
 ```text
-eval: score=0.0573 win=50.6% bid=18.3% dec=47.0% def=52.9% games=10000
+eval: score=0.0930 win=51.3% bid=18.7% dec=47.0% def=54.1% games=15000
 ```
 
 This is a modest edge, not a solved AI. The main gain is defensive play and more disciplined bidding. Declarer play remains the largest weakness.
 
-Training scripts and model artifacts should be committed. Pipeline run logs under `data/training-runs/` are intermediate local data and are ignored.
+Training scripts and model artifacts should be committed. Pipeline run logs under `data/training-runs/` and replay shards under `data/training-datasets/` are intermediate local data and are ignored. The current local replay store is intentionally larger than the model artifact; in the latest development session it reached 1.3 GB across 30 shard files plus one manifest before the accepted model was committed.
 
 To reduce overfitting to the current rulebase, the pipeline snapshots previous MLP generations under `data/training-runs/model-snapshots/` and mixes those older policies into non-learner seats during training and holdout evaluation. These snapshots are local intermediate data; only accepted runtime artifacts under `assets/models/` are committed.
 
@@ -75,9 +77,10 @@ accepted: score delta 0.0036, win delta -0.17pp
 Latest accepted MLP run:
 
 ```text
-baseline holdout:  score=0.0384 win=50.0% bid=20.2% dec=45.6% def=53.0% games=15000
-candidate holdout: score=0.1083 win=51.5% bid=18.3% dec=48.7% def=53.3% games=15000
-accepted: score delta 0.0699, win delta 1.47pp
+command: npm run ai:pipeline -- --mlp --epochs=5 --train-games=2400 --eval-games=6000 --inner-eval-games=2500 --repeats=6 --seed=20260714 --min-score-delta=0.002 --exploration=0.05 --learning-rate=0.00035 --batch-size=192 --train-passes=2 --opponent-generations=8 --replay-samples=160000 --replay-ratio=0.8 --validation-replay-samples=24000 --train-play=false
+baseline holdout:  score=0.0827 win=51.3% bid=18.7% dec=48.0% def=53.4% games=18000
+candidate holdout: score=0.0895 win=51.4% bid=18.7% dec=48.1% def=53.5% games=18000
+accepted: score delta 0.0068, win delta 0.10pp
 ```
 
 Latest 20-run campaign with prior-generation opponents:

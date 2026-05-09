@@ -18,7 +18,16 @@ function main() {
     `--batch-size=${Number(options.batchSize || 192)}`,
     `--train-passes=${Number(options.trainPasses || 3)}`,
     `--opponent-generations=${Number(options.opponentGenerations || 8)}`,
+    `--replay-samples=${Number(options.replaySamples || 60000)}`,
+    `--replay-ratio=${Number(options.replayRatio || 0.75)}`,
+    `--validation-replay-samples=${Number(options.validationReplaySamples || 12000)}`,
   ];
+  if (options.trainBid === "false") {
+    pipelineArgs.push("--train-bid=false");
+  }
+  if (options.trainPlay === "false") {
+    pipelineArgs.push("--train-play=false");
+  }
 
   for (let index = 1; index <= runs; index += 1) {
     const seed = baseSeed + index * 9973;
