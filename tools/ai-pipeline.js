@@ -171,6 +171,9 @@ function buildMlpTrainArgs(options, { seed, trainGames, evalGames, repeats, oppo
   if (options.trainPlay === "false") {
     args.push("--train-play=false");
   }
+  if (options.rolePlayHeads === "false") {
+    args.push("--role-play-heads=false");
+  }
   if (options.fresh) {
     args.push("--fresh");
   }

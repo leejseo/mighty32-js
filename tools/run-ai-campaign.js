@@ -33,6 +33,9 @@ function main() {
   if (options.trainPlay === "false") {
     pipelineArgs.push("--train-play=false");
   }
+  if (options.rolePlayHeads === "false") {
+    pipelineArgs.push("--role-play-heads=false");
+  }
 
   for (let index = 1; index <= runs; index += 1) {
     const seed = baseSeed + index * 9973;

@@ -32,12 +32,16 @@ function main() {
   const rolloutCandidateLimit = Number(options.rolloutCandidateLimit || 2);
   const playRolloutRate = Number(options.playRolloutRate || 0);
   const rolloutExploration = Number(options.rolloutExploration || 0.025);
+  const rolePlayHeads = options.rolePlayHeads !== "false";
 
   const rng = engine.createRng(seed);
   const baseModel = engine.loadModel();
   const mlp = options.fresh || !baseModel.mlp
     ? createMlpModel({ rng, bidHidden, playHidden })
     : engine.cloneMlpModel(baseModel.mlp);
+  if (rolePlayHeads) {
+    ensureRolePlayHeads(mlp);
+  }
   let workingModel = {
     ...baseModel,
     mlp,
@@ -100,17 +104,18 @@ function main() {
         })
       : skippedHeadStats(workingModel.mlp.bid, trainSamples.bid);
     const playStats = trainPlay
-      ? trainHead(workingModel.mlp.play, trainSamples.play, {
+      ? trainPlayHeads(workingModel.mlp, trainSamples.play, {
           rng,
           learningRate,
           batchSize,
           passes: trainPasses,
           l2: 0.00005,
+          rolePlayHeads,
         })
-      : skippedHeadStats(workingModel.mlp.play, trainSamples.play);
+      : skippedPlayStats(workingModel.mlp, trainSamples.play, rolePlayHeads);
     const validation = {
       bidLoss: lossForSamples(workingModel.mlp.bid, validationSamples.bid),
-      playLoss: lossForSamples(workingModel.mlp.play, validationSamples.play),
+      playLoss: lossForPlaySamples(workingModel.mlp, validationSamples.play, rolePlayHeads),
       replay: {
         trainBid: trainSamples.bid.length - split.train.bid.length,
         trainPlay: trainSamples.play.length - split.train.play.length,
@@ -166,6 +171,7 @@ function main() {
       validationReplaySamples,
       trainBid,
       trainPlay,
+      rolePlayHeads,
       candidateLimit,
       playRolloutSamples,
       rolloutCandidateLimit,
@@ -178,6 +184,7 @@ function main() {
     },
     bid: bestMlp.bid,
     play: bestMlp.play,
+    playHeads: bestMlp.playHeads || null,
   };
   engine.writeMlpModel(finalModel);
   printEval("best", bestResult);
@@ -209,6 +216,25 @@ function createMlpModel({ rng, bidHidden, playHidden }) {
     enabled: true,
     bid: createHead(engine.BID_FEATURES.length, bidHidden, 0.45, rng),
     play: createHead(engine.PLAY_FEATURES.length, playHidden, 0.28, rng),
+  };
+}
+
+function ensureRolePlayHeads(mlp) {
+  if (mlp.playHeads) {
+    return;
+  }
+  mlp.playHeads = engine.PLAY_ROLES.reduce((heads, role) => {
+    heads[role] = cloneHead(mlp.play);
+    return heads;
+  }, {});
+}
+
+function cloneHead(head) {
+  return {
+    ...head,
+    w1: head.w1.slice(),
+    b1: head.b1.slice(),
+    w2: head.w2.slice(),
   };
 }
 
@@ -291,6 +317,7 @@ function collectSamples({
           trickNumber: sample.trickNumber || 0,
           isLead: Boolean(sample.isLead),
           cardId: sample.cardId || null,
+          playRole: sample.kind === "play" ? samplePlayRole(sample) : null,
           trump: sample.trump || null,
           contractTarget: sample.target || null,
         };
@@ -331,6 +358,16 @@ function targetForSample(sample) {
   const deltaScale = sample.kind === "bid" ? 0.18 : 0.035;
   const adjustment = clamp((sample.scoreDelta || 0) * deltaScale, -0.55, 0.55);
   return clamp(base + adjustment, -1.3, 1.3);
+}
+
+function samplePlayRole(sample) {
+  if (engine.PLAY_ROLES.includes(sample.playRole)) {
+    return sample.playRole;
+  }
+  if (sample.actorDeclared) {
+    return "declarer";
+  }
+  return sample.actorDeclarerSide ? "friend" : "defense";
 }
 
 function sampleWeight(sample) {
@@ -476,10 +513,21 @@ function parseReplayRow(line) {
       weight: Number(row.weight || 1),
       split: row.split || "train",
       kind: row.kind,
+      playRole: row.kind === "play" ? replayPlayRole(row) : null,
     };
   } catch {
     return null;
   }
+}
+
+function replayPlayRole(row) {
+  if (engine.PLAY_ROLES.includes(row.playRole)) {
+    return row.playRole;
+  }
+  if (row.actorDeclared) {
+    return "declarer";
+  }
+  return row.actorDeclarerSide ? "friend" : "defense";
 }
 
 function trainHead(head, samples, options) {
@@ -508,6 +556,52 @@ function skippedHeadStats(head, samples) {
     loss: lossForSamples(head, samples),
     samples: samples.length,
     updates: 0,
+  };
+}
+
+function trainPlayHeads(mlp, samples, options) {
+  if (!options.rolePlayHeads || !mlp.playHeads) {
+    return trainHead(mlp.play, samples, options);
+  }
+  const roles = {};
+  let weightedLoss = 0;
+  let totalSamples = 0;
+  let totalUpdates = 0;
+  for (const role of engine.PLAY_ROLES) {
+    const roleSamples = samples.filter((sample) => sample.playRole === role);
+    const stats = trainHead(mlp.playHeads[role], roleSamples, options);
+    roles[role] = stats;
+    weightedLoss += stats.loss * roleSamples.length;
+    totalSamples += roleSamples.length;
+    totalUpdates += stats.updates || 0;
+  }
+  return {
+    loss: weightedLoss / Math.max(1, totalSamples),
+    samples: totalSamples,
+    updates: totalUpdates,
+    roles,
+  };
+}
+
+function skippedPlayStats(mlp, samples, rolePlayHeads) {
+  if (!rolePlayHeads || !mlp.playHeads) {
+    return skippedHeadStats(mlp.play, samples);
+  }
+  const roles = {};
+  let weightedLoss = 0;
+  let totalSamples = 0;
+  for (const role of engine.PLAY_ROLES) {
+    const roleSamples = samples.filter((sample) => sample.playRole === role);
+    const stats = skippedHeadStats(mlp.playHeads[role], roleSamples);
+    roles[role] = stats;
+    weightedLoss += stats.loss * roleSamples.length;
+    totalSamples += roleSamples.length;
+  }
+  return {
+    loss: weightedLoss / Math.max(1, totalSamples),
+    samples: totalSamples,
+    updates: 0,
+    roles,
   };
 }
 
@@ -579,6 +673,22 @@ function lossForSamples(head, samples) {
   let total = 0;
   let weightTotal = 0;
   for (const sample of samples) {
+    const error = forwardHead(head, sample.features).output - sample.target;
+    const weight = sample.weight || 1;
+    total += huberLoss(error) * weight;
+    weightTotal += weight;
+  }
+  return total / Math.max(1e-9, weightTotal);
+}
+
+function lossForPlaySamples(mlp, samples, rolePlayHeads) {
+  if (!rolePlayHeads || !mlp.playHeads) {
+    return lossForSamples(mlp.play, samples);
+  }
+  let total = 0;
+  let weightTotal = 0;
+  for (const sample of samples) {
+    const head = mlp.playHeads[sample.playRole] || mlp.play;
     const error = forwardHead(head, sample.features).output - sample.target;
     const weight = sample.weight || 1;
     total += huberLoss(error) * weight;

@@ -37,6 +37,7 @@ Sources:
 - Added replay-buffer training over persisted shards, deterministic train/validation/test row splits, prior-generation opponent sampling, and `--train-bid=false` / `--train-play=false` ablation controls.
 - Expanded training rows from selected actions to top candidate actions. Selected actions use played return, non-selected candidates use a low-weight score-delta target, and sampled play candidates can use full-game rollout reward labels.
 - Added `tools/review-ai-game.js` and `npm run ai:review` for manual decision trace review with hands, current trick, selected action, and top alternatives.
+- Added optional role-specific play heads: `playHeads.declarer`, `playHeads.friend`, and `playHeads.defense`. Runtime inference picks one role head, falling back to the shared play head for older models.
 
 ## Current Model
 
@@ -47,7 +48,7 @@ The runtime model is still small enough for static hosting, but no longer just a
 - Linear binary size: 188 bytes.
 - MLP bid head: 16 inputs, 64 hidden units.
 - MLP play head: 28 inputs, 128 hidden units.
-- MLP binary size: about 20 KB.
+- MLP binary size: about 20 KB for the shared-head model, about 66 KB when role-specific play heads are present.
 - Browser runtime: plain JavaScript plus optional static binary fetch.
 
 Latest validation command:
@@ -64,7 +65,7 @@ eval: score=0.0930 win=51.3% bid=18.7% dec=47.0% def=54.1% games=15000
 
 This is a modest edge, not a solved AI. The main gain is defensive play and more disciplined bidding. Declarer play remains the largest weakness.
 
-Training scripts and model artifacts should be committed. Pipeline run logs under `data/training-runs/` and replay shards under `data/training-datasets/` are intermediate local data and are ignored. The current local replay store is intentionally larger than the model artifact; after adding candidate-action and rollout labels it reached 2.5 GB across 40 shard files plus one manifest.
+Training scripts and model artifacts should be committed. Pipeline run logs under `data/training-runs/` and replay shards under `data/training-datasets/` are intermediate local data and are ignored. The current local replay store is intentionally larger than the model artifact; after adding candidate-action, rollout, and role labels it reached 3.0 GB across 45 shard files plus one manifest.
 
 To reduce overfitting to the current rulebase, the pipeline snapshots previous MLP generations under `data/training-runs/model-snapshots/` and mixes those older policies into non-learner seats during training and holdout evaluation. These snapshots are local intermediate data; only accepted runtime artifacts under `assets/models/` are committed.
 
@@ -96,6 +97,11 @@ bid-only candidate labels:
   command: npm run ai:pipeline -- --mlp --epochs=5 --train-games=1800 --eval-games=6000 --inner-eval-games=2400 --repeats=6 --seed=20260724 --candidate-limit=3 --train-play=false
   dataset: about 211k rows/epoch
   holdout: baseline score=0.1069, candidate score=0.1065, reverted by gate at -0.0004
+role-specific play heads:
+  command: npm run ai:pipeline -- --mlp --epochs=5 --train-games=1800 --eval-games=6000 --inner-eval-games=2400 --repeats=6 --seed=20260812 --candidate-limit=2 --play-rollout-samples=1 --play-rollout-rate=0.015 --train-bid=false
+  dataset: about 163k rows/epoch, about 2.3k play-rollout labels/epoch
+  latest role split: declarer=32677, friend=31880, defense=91934 play rows
+  holdout: baseline score=0.0888, candidate score=0.0888, reverted by gate at +0.0000
 ```
 
 Manual trace review with `npm run ai:review -- --games=2 --seed=20260801 --limit=28` showed two useful patterns:

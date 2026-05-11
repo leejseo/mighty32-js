@@ -9,6 +9,7 @@ const DEFAULT_AVATARS = [
 const CHARACTER_STORAGE_KEY = "mighty32-lite-characters";
 const SUITS = ["S", "D", "H", "C"];
 const BID_TRUMPS = ["S", "D", "H", "C", "NT"];
+const AI_PLAY_ROLES = ["declarer", "friend", "defense"];
 const SUIT_LABELS = {
   S: "♠",
   D: "◆",
@@ -181,6 +182,7 @@ function createDefaultAiMlpPolicyModel() {
     enabled: false,
     bid: null,
     play: null,
+    playHeads: null,
   };
 }
 
@@ -319,6 +321,8 @@ function parseBinaryAiMlpPolicyModel(buffer, scriptModel = null) {
   if (!play) {
     return null;
   }
+  offset = play.nextOffset;
+  const playHeads = readRolePlayHeads(view, buffer.byteLength, offset, playInput, playHidden, scriptModel?.playHeads);
   return normalizeAiMlpPolicyModel(
     {
       name: "mighty-mlp-policy-v2",
@@ -327,9 +331,41 @@ function parseBinaryAiMlpPolicyModel(buffer, scriptModel = null) {
       enabled: true,
       bid: bid.head,
       play: play.head,
+      playHeads,
     },
     "binary",
   );
+}
+
+function readRolePlayHeads(view, byteLength, startOffset, input, hidden, scriptHeads = null) {
+  if (startOffset + 8 > byteLength) {
+    return null;
+  }
+  const magic = String.fromCharCode(
+    view.getUint8(startOffset),
+    view.getUint8(startOffset + 1),
+    view.getUint8(startOffset + 2),
+    view.getUint8(startOffset + 3),
+  );
+  if (magic !== "M32R") {
+    return null;
+  }
+  const roleCount = view.getUint16(startOffset + 4, true);
+  const roleHidden = view.getUint16(startOffset + 6, true);
+  if (roleCount !== AI_PLAY_ROLES.length || roleHidden !== hidden) {
+    return null;
+  }
+  let offset = startOffset + 8;
+  const heads = {};
+  for (const role of AI_PLAY_ROLES) {
+    const read = readMlpHead(view, byteLength, offset, input, hidden, scriptHeads?.[role]?.outputScale ?? 0.28);
+    if (!read) {
+      return null;
+    }
+    heads[role] = read.head;
+    offset = read.nextOffset;
+  }
+  return heads;
 }
 
 function readMlpHead(view, byteLength, startOffset, input, hidden, outputScale) {
@@ -375,6 +411,7 @@ function normalizeAiMlpPolicyModel(model, source = "inline") {
   }
   const bid = normalizeMlpHead(model.bid, AI_BID_FEATURES.length);
   const play = normalizeMlpHead(model.play, AI_PLAY_FEATURES.length);
+  const playHeads = normalizeRolePlayHeads(model.playHeads, play);
   if (!bid || !play) {
     return null;
   }
@@ -385,7 +422,31 @@ function normalizeAiMlpPolicyModel(model, source = "inline") {
     enabled: model.enabled !== false,
     bid,
     play,
+    playHeads,
   };
+}
+
+function normalizeRolePlayHeads(heads, fallback = null) {
+  if (!heads || typeof heads !== "object") {
+    return null;
+  }
+  const normalized = {};
+  for (const role of AI_PLAY_ROLES) {
+    const head = normalizeMlpHead(heads[role], AI_PLAY_FEATURES.length);
+    if (!head) {
+      return null;
+    }
+    normalized[role] = head;
+  }
+  if (fallback) {
+    const sameShape = AI_PLAY_ROLES.every(
+      (role) => normalized[role].input === fallback.input && normalized[role].hidden === fallback.hidden,
+    );
+    if (!sameShape) {
+      return null;
+    }
+  }
+  return normalized;
 }
 
 function normalizeMlpHead(head, expectedInput) {
@@ -1178,10 +1239,22 @@ function evaluateAiPolicyPlay(playerIndex, card, legalCards, outcome) {
   const linearScore = aiPolicyModel.enabled
     ? dotWeights(aiPolicyModel.playWeights, features) * aiPolicyModel.playScale
     : 0;
+  const playHead = getAiMlpPlayHeadForRole(getAiPlayRole(playerIndex));
   const mlpScore = aiMlpPolicyModel.enabled
-    ? evaluateMlpHead(aiMlpPolicyModel.play, features)
+    ? evaluateMlpHead(playHead, features)
     : 0;
   return clamp(linearScore + mlpScore, -22, 22);
+}
+
+function getAiMlpPlayHeadForRole(role) {
+  return aiMlpPolicyModel.playHeads?.[role] || aiMlpPolicyModel.play || null;
+}
+
+function getAiPlayRole(playerIndex) {
+  if (playerIndex === state.declarerIndex) {
+    return "declarer";
+  }
+  return getSideForAi(playerIndex) === "declarer" ? "friend" : "defense";
 }
 
 function buildAiPlayFeatures(playerIndex, card, legalCards, outcome) {

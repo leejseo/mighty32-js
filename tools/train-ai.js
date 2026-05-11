@@ -11,6 +11,7 @@ const MLP_MODEL_BIN = path.join(ROOT, "assets/models/mighty-mlp-policy-v2.bin");
 const MLP_MODEL_MAGIC = "M32M";
 const SUITS = ["S", "D", "H", "C"];
 const BID_TRUMPS = ["S", "D", "H", "C", "NT"];
+const PLAY_ROLES = ["declarer", "friend", "defense"];
 const MAX_TARGET = 20;
 const TOTAL_POINT_CARDS = 20;
 const MIN_TARGET = 13;
@@ -202,6 +203,7 @@ function normalizeMlpModel(model) {
   }
   const bid = normalizeMlpHead(model.bid, BID_FEATURES.length);
   const play = normalizeMlpHead(model.play, PLAY_FEATURES.length);
+  const playHeads = normalizeRolePlayHeads(model.playHeads, play);
   if (!bid || !play) {
     return null;
   }
@@ -212,8 +214,32 @@ function normalizeMlpModel(model) {
     enabled: model.enabled !== false,
     bid,
     play,
+    playHeads,
     training: model.training || null,
   };
+}
+
+function normalizeRolePlayHeads(heads, fallback = null) {
+  if (!heads || typeof heads !== "object") {
+    return null;
+  }
+  const normalized = {};
+  for (const role of PLAY_ROLES) {
+    const head = normalizeMlpHead(heads[role], PLAY_FEATURES.length);
+    if (!head) {
+      return null;
+    }
+    normalized[role] = head;
+  }
+  if (fallback) {
+    const sameShape = PLAY_ROLES.every(
+      (role) => normalized[role].input === fallback.input && normalized[role].hidden === fallback.hidden,
+    );
+    if (!sameShape) {
+      return null;
+    }
+  }
+  return normalized;
 }
 
 function normalizeMlpHead(head, expectedInput) {
@@ -353,8 +379,19 @@ function cloneMlpModel(model) {
     ...model,
     bid: cloneMlpHead(model.bid),
     play: cloneMlpHead(model.play),
+    playHeads: cloneRolePlayHeads(model.playHeads),
     training: model.training ? { ...model.training } : null,
   };
+}
+
+function cloneRolePlayHeads(heads) {
+  if (!heads) {
+    return null;
+  }
+  return PLAY_ROLES.reduce((cloned, role) => {
+    cloned[role] = cloneMlpHead(heads[role]);
+    return cloned;
+  }, {});
 }
 
 function cloneMlpHead(head) {
@@ -858,6 +895,7 @@ function recordPlayCandidateSamples(game, playerIndex, policyModel, legalCards, 
   const selectedIndex = candidates.findIndex((candidate) => candidate.card.id === chosen.card.id);
   const pool = ensureSelectedCandidate(candidates, chosen, game.candidateLimit);
   const shouldRollout = game.playRolloutSamples > 0 && game.playRolloutRate > 0 && game.rng() < game.playRolloutRate;
+  const playRole = getPlayRole(game, playerIndex);
   for (let index = 0; index < pool.length; index += 1) {
     const candidate = pool[index];
     const selected = candidate.card.id === chosen.card.id;
@@ -875,6 +913,7 @@ function recordPlayCandidateSamples(game, playerIndex, policyModel, legalCards, 
       policyScore,
       ruleScore: candidate.score - policyScore,
       cardId: candidate.card.id,
+      playRole,
       trickNumber: game.trickNumber,
       isLead: game.trick.length === 0,
       selected,
@@ -1168,10 +1207,25 @@ function buildBidFeatures(game, candidate, playerIndex) {
 function evaluateModelPlay(game, playerIndex, card, legalCards, outcome, model = game.model) {
   const features = buildPlayFeatures(game, playerIndex, card, legalCards, outcome);
   const linearScore = dot(model.playWeights, features) * model.playScale;
-  const mlpScore = model.mlp?.enabled !== false && model.mlp?.play
-    ? evaluateMlpHead(model.mlp.play, features)
+  const playHead = getMlpPlayHeadForRole(model.mlp, getPlayRole(game, playerIndex));
+  const mlpScore = model.mlp?.enabled !== false && playHead
+    ? evaluateMlpHead(playHead, features)
     : 0;
   return clamp(linearScore + mlpScore, -22, 22);
+}
+
+function getMlpPlayHeadForRole(mlp, role) {
+  if (!mlp) {
+    return null;
+  }
+  return mlp.playHeads?.[role] || mlp.play || null;
+}
+
+function getPlayRole(game, playerIndex) {
+  if (playerIndex === game.declarerIndex) {
+    return "declarer";
+  }
+  return getSide(game, playerIndex) === "declarer" ? "friend" : "defense";
 }
 
 function buildPlayFeatures(game, playerIndex, card, legalCards, outcome) {
@@ -1793,9 +1847,20 @@ function writeMlpModel(model) {
     ...normalized,
     bid: serializeMlpHead(normalized.bid),
     play: serializeMlpHead(normalized.play),
+    playHeads: serializeRolePlayHeads(normalized.playHeads),
   };
   fs.writeFileSync(MLP_MODEL_JS, `window.MIGHTY32_MLP_MODEL = ${JSON.stringify(output, null, 2)};\n`);
   writeMlpBinaryModel(output);
+}
+
+function serializeRolePlayHeads(heads) {
+  if (!heads) {
+    return null;
+  }
+  return PLAY_ROLES.reduce((serialized, role) => {
+    serialized[role] = serializeMlpHead(heads[role]);
+    return serialized;
+  }, {});
 }
 
 function serializeMlpHead(head) {
@@ -1815,8 +1880,15 @@ function writeMlpBinaryModel(model) {
   const play = model.play;
   const bidValues = bid.w1.concat(bid.b1, bid.w2, [bid.b2]);
   const playValues = play.w1.concat(play.b1, play.w2, [play.b2]);
+  const roleValues = model.playHeads
+    ? PLAY_ROLES.flatMap((role) => {
+        const head = model.playHeads[role];
+        return head.w1.concat(head.b1, head.w2, [head.b2]);
+      })
+    : [];
+  const extensionSize = model.playHeads ? 8 : 0;
   const headerSize = 16;
-  const buffer = Buffer.alloc(headerSize + (bidValues.length + playValues.length) * 4);
+  const buffer = Buffer.alloc(headerSize + (bidValues.length + playValues.length + roleValues.length) * 4 + extensionSize);
   buffer.write(MLP_MODEL_MAGIC, 0, "ascii");
   buffer.writeUInt16LE(model.version || 1, 4);
   buffer.writeUInt16LE(bid.input, 6);
@@ -1828,6 +1900,18 @@ function writeMlpBinaryModel(model) {
   for (const value of bidValues.concat(playValues)) {
     buffer.writeFloatLE(value, offset);
     offset += 4;
+  }
+  if (model.playHeads) {
+    buffer.write("M32R", offset, "ascii");
+    offset += 4;
+    buffer.writeUInt16LE(PLAY_ROLES.length, offset);
+    offset += 2;
+    buffer.writeUInt16LE(play.hidden, offset);
+    offset += 2;
+    for (const value of roleValues) {
+      buffer.writeFloatLE(value, offset);
+      offset += 4;
+    }
   }
   fs.writeFileSync(MLP_MODEL_BIN, buffer);
 }
@@ -1854,6 +1938,7 @@ if (require.main === module) {
   module.exports = {
     BID_FEATURES,
     PLAY_FEATURES,
+    PLAY_ROLES,
     MLP_MODEL_JS,
     MLP_MODEL_BIN,
     MLP_MODEL_MAGIC,
