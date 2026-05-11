@@ -404,10 +404,30 @@ function evaluateModel(model, games, seed, opponentModels = []) {
   };
 }
 
-function runGame({ rng, learnerIndex, model, collector = null, exploration = 0, opponentModels = [] }) {
+function runGame({
+  rng,
+  learnerIndex,
+  model,
+  collector = null,
+  exploration = 0,
+  opponentModels = [],
+  candidateLimit = 1,
+  playRolloutSamples = 0,
+  rolloutCandidateLimit = 2,
+  playRolloutRate = 0,
+  rolloutExploration = 0.025,
+  decisionLog = null,
+}) {
   let game = null;
   for (let attempts = 0; attempts < 20; attempts += 1) {
-    game = createGame(rng, learnerIndex, model, collector, exploration, opponentModels);
+    game = createGame(rng, learnerIndex, model, collector, exploration, opponentModels, {
+      candidateLimit,
+      playRolloutSamples,
+      rolloutCandidateLimit,
+      playRolloutRate,
+      rolloutExploration,
+      decisionLog,
+    });
     if (!game.dealMiss) {
       break;
     }
@@ -434,7 +454,7 @@ function runGame({ rng, learnerIndex, model, collector = null, exploration = 0, 
   return result;
 }
 
-function createGame(rng, learnerIndex, model, collector = null, exploration = 0, opponentModels = []) {
+function createGame(rng, learnerIndex, model, collector = null, exploration = 0, opponentModels = [], learningOptions = {}) {
   const deck = shuffle(createDeck(), rng);
   const hands = [[], [], [], [], []];
   for (let i = 0; i < 50; i += 1) {
@@ -475,6 +495,12 @@ function createGame(rng, learnerIndex, model, collector = null, exploration = 0,
     collector,
     exploration,
     decisionSamples: [],
+    candidateLimit: Math.max(1, Number(learningOptions.candidateLimit || 1)),
+    playRolloutSamples: Math.max(0, Number(learningOptions.playRolloutSamples || 0)),
+    rolloutCandidateLimit: Math.max(1, Number(learningOptions.rolloutCandidateLimit || 2)),
+    playRolloutRate: clamp(Number(learningOptions.playRolloutRate || 0), 0, 1),
+    rolloutExploration: clamp(Number(learningOptions.rolloutExploration || 0.025), 0, 0.4),
+    decisionLog: learningOptions.decisionLog || null,
     opponentModels,
     opponentAssignments,
   };
@@ -576,18 +602,9 @@ function chooseBid(game, playerIndex, policyModel, rng) {
     return null;
   }
   const chosen = policyModel ? selectExplorationCandidate(game, candidates, 0.55) : best;
+  logBidDecision(game, playerIndex, candidates, chosen);
   if (game.collector) {
-    const policyScore = policyModel ? evaluateModelBid(game, chosen, playerIndex, policyModel) : 0;
-    game.decisionSamples.push({
-      actorIndex: playerIndex,
-      kind: "bid",
-      features: buildBidFeatures(game, chosen, playerIndex),
-      policyScore,
-      ruleScore: chosen.score - policyScore,
-      target: chosen.target,
-      trump: chosen.trump,
-      trickNumber: 0,
-    });
+    recordBidCandidateSamples(game, playerIndex, policyModel, candidates, chosen);
   }
   return { trump: chosen.trump, target: chosen.target };
 }
@@ -720,15 +737,7 @@ function playRound(game, rng) {
       if (!card) {
         throw new Error(`No legal card for player ${player}`);
       }
-      if (game.trick.length === 0) {
-        if (card.joker && isJokerEffective(game)) {
-          game.jokerLeadSuit = chooseJokerLeadSuit(game, player);
-        }
-        game.jokerCallActive = isJokerCall(game, card) && shouldUseJokerCall(game, player, card);
-      }
-      game.hands[player] = game.hands[player].filter((item) => item.id !== card.id);
-      game.trick.push({ playerIndex: player, card });
-      recordPlay(game, player, card);
+      applyPlayedCard(game, player, card);
       player = nextPlayer(player);
     }
     const winner = getTrickWinner(game, game.trick);
@@ -753,20 +762,140 @@ function chooseCard(game, playerIndex, policyModel) {
     })
     .sort((a, b) => b.score - a.score || aiCardSpendCost(game, a.card) - aiCardSpendCost(game, b.card));
   const chosen = policyModel ? selectExplorationCandidate(game, candidates, 2.2) : candidates[0];
+  logPlayDecision(game, playerIndex, legalCards, candidates, chosen);
   if (game.collector) {
-    const policyScore = policyModel ? evaluateModelPlay(game, playerIndex, chosen.card, legalCards, chosen.outcome, policyModel) : 0;
+    recordPlayCandidateSamples(game, playerIndex, policyModel, legalCards, candidates, chosen);
+  }
+  return chosen.card;
+}
+
+function logBidDecision(game, playerIndex, candidates, chosen) {
+  if (!game.decisionLog) {
+    return;
+  }
+  game.decisionLog.push({
+    phase: "bid",
+    playerIndex,
+    currentBid: game.currentBid ? { ...game.currentBid } : null,
+    hand: game.hands[playerIndex].map((card) => card.id),
+    selected: {
+      trump: chosen.trump,
+      target: chosen.target,
+      score: roundLogNumber(chosen.score),
+    },
+    candidates: candidates.slice(0, 5).map((candidate) => ({
+      trump: candidate.trump,
+      target: candidate.target,
+      score: roundLogNumber(candidate.score),
+      confidence: roundLogNumber(candidate.confidence || 0),
+      successChance: roundLogNumber(candidate.failure?.successChance || 0),
+      expectedPoints: roundLogNumber(candidate.expectedPoints || 0),
+    })),
+  });
+}
+
+function logPlayDecision(game, playerIndex, legalCards, candidates, chosen) {
+  if (!game.decisionLog) {
+    return;
+  }
+  game.decisionLog.push({
+    phase: "play",
+    playerIndex,
+    trickNumber: game.trickNumber,
+    trump: game.trump,
+    target: game.target,
+    declarerIndex: game.declarerIndex,
+    friendIndex: game.friendIndex,
+    side: getSide(game, playerIndex),
+    hand: game.hands[playerIndex].map((card) => card.id),
+    trick: game.trick.map((entry) => ({ playerIndex: entry.playerIndex, cardId: entry.card.id })),
+    legalCount: legalCards.length,
+    selected: {
+      cardId: chosen.card.id,
+      score: roundLogNumber(chosen.score),
+      winner: chosen.outcome.winner,
+      points: chosen.outcome.points,
+    },
+    candidates: candidates.slice(0, 5).map((candidate) => ({
+      cardId: candidate.card.id,
+      score: roundLogNumber(candidate.score),
+      winner: candidate.outcome.winner,
+      points: candidate.outcome.points,
+      spendCost: roundLogNumber(aiCardSpendCost(game, candidate.card)),
+    })),
+  });
+}
+
+function recordBidCandidateSamples(game, playerIndex, policyModel, candidates, chosen) {
+  const selectedIndex = candidates.findIndex((candidate) => candidate.trump === chosen.trump && candidate.target === chosen.target);
+  const pool = ensureSelectedCandidate(candidates, chosen, game.candidateLimit);
+  for (let index = 0; index < pool.length; index += 1) {
+    const candidate = pool[index];
+    const policyScore = policyModel ? evaluateModelBid(game, candidate, playerIndex, policyModel) : 0;
+    const selected = candidate.trump === chosen.trump && candidate.target === chosen.target;
+    game.decisionSamples.push({
+      actorIndex: playerIndex,
+      kind: "bid",
+      features: buildBidFeatures(game, candidate, playerIndex),
+      policyScore,
+      ruleScore: candidate.score - policyScore,
+      target: candidate.target,
+      trump: candidate.trump,
+      trickNumber: 0,
+      selected,
+      candidateRank: candidates.indexOf(candidate),
+      selectedRank: selectedIndex,
+      candidateCount: candidates.length,
+      candidateScore: candidate.score,
+      chosenScore: chosen.score,
+      scoreDelta: candidate.score - chosen.score,
+      labelSource: selected ? "played-return" : "candidate-prior",
+    });
+  }
+}
+
+function recordPlayCandidateSamples(game, playerIndex, policyModel, legalCards, candidates, chosen) {
+  const selectedIndex = candidates.findIndex((candidate) => candidate.card.id === chosen.card.id);
+  const pool = ensureSelectedCandidate(candidates, chosen, game.candidateLimit);
+  const shouldRollout = game.playRolloutSamples > 0 && game.playRolloutRate > 0 && game.rng() < game.playRolloutRate;
+  for (let index = 0; index < pool.length; index += 1) {
+    const candidate = pool[index];
+    const selected = candidate.card.id === chosen.card.id;
+    const policyScore = policyModel
+      ? evaluateModelPlay(game, playerIndex, candidate.card, legalCards, candidate.outcome, policyModel)
+      : 0;
+    const rolloutReward =
+      shouldRollout && index < game.rolloutCandidateLimit
+        ? estimatePlayRolloutReward(game, playerIndex, candidate.card, game.playRolloutSamples)
+        : null;
     game.decisionSamples.push({
       actorIndex: playerIndex,
       kind: "play",
-      features: buildPlayFeatures(game, playerIndex, chosen.card, legalCards, chosen.outcome),
+      features: buildPlayFeatures(game, playerIndex, candidate.card, legalCards, candidate.outcome),
       policyScore,
-      ruleScore: chosen.score - policyScore,
-      cardId: chosen.card.id,
+      ruleScore: candidate.score - policyScore,
+      cardId: candidate.card.id,
       trickNumber: game.trickNumber,
       isLead: game.trick.length === 0,
+      selected,
+      candidateRank: candidates.indexOf(candidate),
+      selectedRank: selectedIndex,
+      candidateCount: candidates.length,
+      candidateScore: candidate.score,
+      chosenScore: chosen.score,
+      scoreDelta: candidate.score - chosen.score,
+      rolloutReward,
+      labelSource: rolloutReward === null ? (selected ? "played-return" : "candidate-prior") : "play-rollout",
     });
   }
-  return chosen.card;
+}
+
+function ensureSelectedCandidate(candidates, chosen, limit) {
+  const pool = candidates.slice(0, Math.max(1, limit));
+  if (!pool.includes(chosen)) {
+    pool[pool.length - 1] = chosen;
+  }
+  return pool;
 }
 
 function evaluateCardChoice(game, playerIndex, card, legalCards, outcome, policyModel) {
@@ -862,6 +991,85 @@ function simulateTrickAfterPlay(game, playerIndex, card) {
     winner,
     points: copy.trick.filter((entry) => isPointCard(entry.card)).length,
   };
+}
+
+function estimatePlayRolloutReward(game, playerIndex, card, samples) {
+  let total = 0;
+  for (let index = 0; index < samples; index += 1) {
+    const rollout = cloneGameForRollout(game, rolloutRngFor(game, playerIndex, card, index));
+    const rolloutCard = rollout.hands[playerIndex].find((item) => item.id === card.id) || card;
+    applyPlayedCard(rollout, playerIndex, rolloutCard);
+    finishPlayFromState(rollout, nextPlayer(playerIndex));
+    total += scoreGameForPlayer(rollout, playerIndex).reward;
+  }
+  return total / Math.max(1, samples);
+}
+
+function cloneGameForRollout(game, rng) {
+  return {
+    ...game,
+    rng,
+    hands: game.hands.map((hand) => hand.map((card) => ({ ...card }))),
+    kitty: game.kitty.map((card) => ({ ...card })),
+    buried: game.buried.map((card) => ({ ...card })),
+    captured: game.captured.map((cards) => cards.map((card) => ({ ...card }))),
+    trick: game.trick.map((entry) => ({ playerIndex: entry.playerIndex, card: { ...entry.card } })),
+    playHistory: game.playHistory.map((entry) => ({ ...entry })),
+    collector: null,
+    decisionSamples: [],
+    playRolloutSamples: 0,
+    playRolloutRate: 0,
+    exploration: game.rolloutExploration,
+  };
+}
+
+function finishPlayFromState(game, player) {
+  while (game.trickNumber <= 10) {
+    while (game.trick.length < 5) {
+      const card = chooseCard(game, player, getPolicyModelForPlayer(game, player));
+      if (!card) {
+        throw new Error(`No legal rollout card for player ${player}`);
+      }
+      applyPlayedCard(game, player, card);
+      player = nextPlayer(player);
+    }
+    const winner = getTrickWinner(game, game.trick);
+    game.captured[winner].push(...game.trick.map((entry) => entry.card));
+    game.leaderIndex = winner;
+    game.trickNumber += 1;
+    if (game.trickNumber > 10) {
+      break;
+    }
+    game.trick = [];
+    game.jokerLeadSuit = null;
+    game.jokerCallActive = false;
+    player = winner;
+  }
+}
+
+function applyPlayedCard(game, playerIndex, card) {
+  if (game.trick.length === 0) {
+    if (card.joker && isJokerEffective(game)) {
+      game.jokerLeadSuit = chooseJokerLeadSuit(game, playerIndex);
+    }
+    game.jokerCallActive = isJokerCall(game, card) && shouldUseJokerCall(game, playerIndex, card);
+  }
+  game.hands[playerIndex] = game.hands[playerIndex].filter((item) => item.id !== card.id);
+  game.trick.push({ playerIndex, card });
+  recordPlay(game, playerIndex, card);
+}
+
+function rolloutRngFor(game, playerIndex, card, rolloutIndex) {
+  const signature = [
+    game.trickNumber,
+    game.trick.map((entry) => `${entry.playerIndex}:${entry.card.id}`).join(","),
+    game.playHistory.length,
+    playerIndex,
+    card.id,
+    rolloutIndex,
+    game.hands.map((hand) => hand.map((item) => item.id).join("-")).join("|"),
+  ].join("|");
+  return createRng(hashString(signature));
 }
 
 function chooseSimulatedResponse(game, playerIndex, legalCards) {
@@ -1510,6 +1718,15 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
+function hashString(value) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
 function createRng(seed) {
   let value = seed >>> 0;
   return function rng() {
@@ -1617,6 +1834,10 @@ function writeMlpBinaryModel(model) {
 
 function roundWeight(value) {
   return Number(value.toFixed(6));
+}
+
+function roundLogNumber(value) {
+  return Number((Number(value) || 0).toFixed(3));
 }
 
 function printEval(label, result) {

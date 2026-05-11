@@ -27,6 +27,11 @@ function main() {
   const validationReplaySamples = Number(options.validationReplaySamples || 12000);
   const trainBid = options.trainBid !== "false";
   const trainPlay = options.trainPlay !== "false";
+  const candidateLimit = Number(options.candidateLimit || 3);
+  const playRolloutSamples = Number(options.playRolloutSamples || 0);
+  const rolloutCandidateLimit = Number(options.rolloutCandidateLimit || 2);
+  const playRolloutRate = Number(options.playRolloutRate || 0);
+  const rolloutExploration = Number(options.rolloutExploration || 0.025);
 
   const rng = engine.createRng(seed);
   const baseModel = engine.loadModel();
@@ -51,6 +56,11 @@ function main() {
       opponentModels,
       seed: seed + epoch * 9176,
       epoch,
+      candidateLimit,
+      playRolloutSamples,
+      rolloutCandidateLimit,
+      playRolloutRate,
+      rolloutExploration,
     });
     const replay = loadReplaySamples({
       rng,
@@ -66,6 +76,10 @@ function main() {
         exploration,
         modelVersion: workingModel.mlp.version || 0,
         opponentModels: opponentModels.length,
+        candidateLimit,
+        playRolloutSamples,
+        rolloutCandidateLimit,
+        playRolloutRate,
       });
     }
     const trainSamples = {
@@ -152,6 +166,11 @@ function main() {
       validationReplaySamples,
       trainBid,
       trainPlay,
+      candidateLimit,
+      playRolloutSamples,
+      rolloutCandidateLimit,
+      playRolloutRate,
+      rolloutExploration,
       bestScore: bestResult.score,
       history,
       bidFeatures: engine.BID_FEATURES,
@@ -206,7 +225,20 @@ function createHead(input, hidden, outputScale, rng) {
   };
 }
 
-function collectSamples({ rng, model, games, exploration, opponentModels, seed, epoch }) {
+function collectSamples({
+  rng,
+  model,
+  games,
+  exploration,
+  opponentModels,
+  seed,
+  epoch,
+  candidateLimit,
+  playRolloutSamples,
+  rolloutCandidateLimit,
+  playRolloutRate,
+  rolloutExploration,
+}) {
   const samples = {
     bid: [],
     play: [],
@@ -219,8 +251,13 @@ function collectSamples({ rng, model, games, exploration, opponentModels, seed, 
       model,
       exploration,
       opponentModels,
+      candidateLimit,
+      playRolloutSamples,
+      rolloutCandidateLimit,
+      playRolloutRate,
+      rolloutExploration,
       collector: (sample) => {
-        const target = rewardToTarget(sample.reward);
+        const target = targetForSample(sample);
         const row = {
           id: `${seed}:${epoch}:${gameIndex}:${sample.kind}:${samples.bid.length + samples.play.length}`,
           seed,
@@ -234,6 +271,17 @@ function collectSamples({ rng, model, games, exploration, opponentModels, seed, 
           target,
           weight: sampleWeight(sample),
           reward: roundSampleNumber(sample.reward),
+          rolloutReward: sample.rolloutReward === null || sample.rolloutReward === undefined
+            ? null
+            : roundSampleNumber(sample.rolloutReward),
+          selected: sample.selected !== false,
+          labelSource: sample.labelSource || "played-return",
+          candidateRank: Number.isInteger(sample.candidateRank) ? sample.candidateRank : 0,
+          selectedRank: Number.isInteger(sample.selectedRank) ? sample.selectedRank : 0,
+          candidateCount: Number(sample.candidateCount || 1),
+          scoreDelta: roundSampleNumber(sample.scoreDelta || 0),
+          candidateScore: roundSampleNumber(sample.candidateScore || 0),
+          chosenScore: roundSampleNumber(sample.chosenScore || 0),
           actorWon: Boolean(sample.actorWon),
           actorDeclarerSide: Boolean(sample.actorDeclarerSide),
           actorDeclared: Boolean(sample.actorDeclared),
@@ -272,10 +320,25 @@ function rewardToTarget(reward) {
   return clamp(reward / 2.6, -1.3, 1.3);
 }
 
+function targetForSample(sample) {
+  if (Number.isFinite(sample.rolloutReward)) {
+    return rewardToTarget(sample.rolloutReward);
+  }
+  const base = rewardToTarget(sample.reward);
+  if (sample.selected !== false) {
+    return base;
+  }
+  const deltaScale = sample.kind === "bid" ? 0.18 : 0.035;
+  const adjustment = clamp((sample.scoreDelta || 0) * deltaScale, -0.55, 0.55);
+  return clamp(base + adjustment, -1.3, 1.3);
+}
+
 function sampleWeight(sample) {
   const absReward = Math.min(2.4, Math.abs(sample.reward || 0));
   const phaseWeight = sample.kind === "bid" ? 1.25 : sample.isLead ? 1.08 : 1;
-  return phaseWeight * (0.55 + absReward * 0.32);
+  const selectedWeight = sample.selected === false ? 0.34 : 1;
+  const rolloutWeight = Number.isFinite(sample.rolloutReward) ? 1.25 : 1;
+  return phaseWeight * selectedWeight * rolloutWeight * (0.55 + absReward * 0.32);
 }
 
 function splitSamples(samples, rng, trainRatio) {
@@ -330,11 +393,17 @@ function writeDatasetShard(samples, metadata) {
     counts[row.kind][row.split] += 1;
     return counts;
   }, {});
+  const labelCounts = rows.reduce((counts, row) => {
+    const key = row.labelSource || "unknown";
+    counts[key] = (counts[key] || 0) + 1;
+    return counts;
+  }, {});
   const manifest = {
     createdAt: new Date().toISOString(),
     shard: path.relative(ROOT, shardPath),
     rows: rows.length,
     splitCounts,
+    labelCounts,
     metadata,
   };
   fs.mkdirSync(DATASET_DIR, { recursive: true });

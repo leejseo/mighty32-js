@@ -35,6 +35,8 @@ Sources:
 - Added `tools/run-ai-campaign.js` for repeated pipeline runs that commit and push accepted model generations.
 - Expanded the MLP dataset pipeline from learner-only rows to all five players' real decisions. Rewards are recalculated from each actor's side, then persisted as JSONL shards under `data/training-datasets/`.
 - Added replay-buffer training over persisted shards, deterministic train/validation/test row splits, prior-generation opponent sampling, and `--train-bid=false` / `--train-play=false` ablation controls.
+- Expanded training rows from selected actions to top candidate actions. Selected actions use played return, non-selected candidates use a low-weight score-delta target, and sampled play candidates can use full-game rollout reward labels.
+- Added `tools/review-ai-game.js` and `npm run ai:review` for manual decision trace review with hands, current trick, selected action, and top alternatives.
 
 ## Current Model
 
@@ -62,7 +64,7 @@ eval: score=0.0930 win=51.3% bid=18.7% dec=47.0% def=54.1% games=15000
 
 This is a modest edge, not a solved AI. The main gain is defensive play and more disciplined bidding. Declarer play remains the largest weakness.
 
-Training scripts and model artifacts should be committed. Pipeline run logs under `data/training-runs/` and replay shards under `data/training-datasets/` are intermediate local data and are ignored. The current local replay store is intentionally larger than the model artifact; in the latest development session it reached 1.3 GB across 30 shard files plus one manifest before the accepted model was committed.
+Training scripts and model artifacts should be committed. Pipeline run logs under `data/training-runs/` and replay shards under `data/training-datasets/` are intermediate local data and are ignored. The current local replay store is intentionally larger than the model artifact; after adding candidate-action and rollout labels it reached 2.5 GB across 40 shard files plus one manifest.
 
 To reduce overfitting to the current rulebase, the pipeline snapshots previous MLP generations under `data/training-runs/model-snapshots/` and mixes those older policies into non-learner seats during training and holdout evaluation. These snapshots are local intermediate data; only accepted runtime artifacts under `assets/models/` are committed.
 
@@ -82,6 +84,24 @@ baseline holdout:  score=0.0827 win=51.3% bid=18.7% dec=48.0% def=53.4% games=18
 candidate holdout: score=0.0895 win=51.4% bid=18.7% dec=48.1% def=53.5% games=18000
 accepted: score delta 0.0068, win delta 0.10pp
 ```
+
+Latest candidate-action experiments:
+
+```text
+rollout candidate labels:
+  command: npm run ai:pipeline -- --mlp --epochs=4 --train-games=1400 --eval-games=6000 --inner-eval-games=2200 --repeats=6 --seed=20260723 --candidate-limit=3 --play-rollout-samples=1 --play-rollout-rate=0.025
+  dataset: about 164k rows/epoch, about 3k play-rollout labels/epoch
+  holdout: baseline score=0.0686, candidate score=0.0698, reverted by gate at +0.0012
+bid-only candidate labels:
+  command: npm run ai:pipeline -- --mlp --epochs=5 --train-games=1800 --eval-games=6000 --inner-eval-games=2400 --repeats=6 --seed=20260724 --candidate-limit=3 --train-play=false
+  dataset: about 211k rows/epoch
+  holdout: baseline score=0.1069, candidate score=0.1065, reverted by gate at -0.0004
+```
+
+Manual trace review with `npm run ai:review -- --games=2 --seed=20260801 --limit=28` showed two useful patterns:
+
+- The AI can find some friend-tempo lines, such as low suit leads that let the friend spend joker and return control.
+- It still hesitates around the transition from tempo gain to trump cleanup and point cash-out. In one reviewed club-contract game, declarer-side play won early points but then led low hearts while still holding multiple high trump, giving defense tempo. This supports splitting the single play head into declarer, friend, and defense heads.
 
 Latest 20-run campaign with prior-generation opponents:
 

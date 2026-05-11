@@ -21,6 +21,11 @@ function main() {
     `--replay-samples=${Number(options.replaySamples || 60000)}`,
     `--replay-ratio=${Number(options.replayRatio || 0.75)}`,
     `--validation-replay-samples=${Number(options.validationReplaySamples || 12000)}`,
+    `--candidate-limit=${Number(options.candidateLimit || 3)}`,
+    `--play-rollout-samples=${Number(options.playRolloutSamples || 0)}`,
+    `--rollout-candidate-limit=${Number(options.rolloutCandidateLimit || 2)}`,
+    `--play-rollout-rate=${Number(options.playRolloutRate || 0)}`,
+    `--rollout-exploration=${Number(options.rolloutExploration || 0.025)}`,
   ];
   if (options.trainBid === "false") {
     pipelineArgs.push("--train-bid=false");

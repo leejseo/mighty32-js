@@ -43,7 +43,7 @@ PORT=5173 npm start
 
 현재 앱은 기존 룰베이스 평가에 선형 정책 모델과 작은 MLP 정책 모델을 더합니다. 모델은 GitHub Pages에서도 그대로 받을 수 있는 정적 JS/바이너리 파일입니다.
 
-MLP 학습은 self-play 중 5명 전원의 입찰/플레이 decision을 각 플레이어 관점 reward로 저장하고, `data/training-datasets/`의 JSONL shard를 replay buffer처럼 다시 섞어 씁니다. 이 데이터셋은 중간 산출물이므로 Git에는 올리지 않고, accepted 모델 JS/바이너리만 커밋합니다.
+MLP 학습은 self-play 중 5명 전원의 입찰/플레이 decision을 각 플레이어 관점 reward로 저장하고, `data/training-datasets/`의 JSONL shard를 replay buffer처럼 다시 섞어 씁니다. 선택된 action뿐 아니라 상위 후보 action도 낮은 weight의 counterfactual label로 저장할 수 있고, 플레이 후보 일부에는 full-game rollout reward를 붙일 수 있습니다. 이 데이터셋은 중간 산출물이므로 Git에는 올리지 않고, accepted 모델 JS/바이너리만 커밋합니다.
 
 ```bash
 npm run ai:eval
@@ -51,7 +51,9 @@ npm run ai:train -- --iterations=12 --candidates=10 --games=1200 --repeats=6 --s
 npm run ai:pipeline -- --iterations=10 --candidates=8 --train-games=1400 --eval-games=4000 --repeats=6
 npm run ai:pipeline -- --mlp --fresh --epochs=8 --train-games=2200 --eval-games=3000 --inner-eval-games=1000 --repeats=5
 npm run ai:pipeline -- --mlp --epochs=5 --train-games=2400 --eval-games=6000 --repeats=6 --train-play=false
+npm run ai:pipeline -- --mlp --epochs=4 --train-games=1400 --eval-games=6000 --candidate-limit=3 --play-rollout-samples=1 --play-rollout-rate=0.025
 npm run ai:campaign -- --runs=20 --opponent-generations=8
+npm run ai:review -- --games=2 --seed=20260801 --limit=28
 ```
 
 검증 예시:
